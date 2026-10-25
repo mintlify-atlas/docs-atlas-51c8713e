@@ -1,0 +1,72 @@
+---
+title: "Hero: Map-Based Geography and History Quiz Platform"
+sidebarTitle: "Introduction"
+description: "An overview of Hero — what it is, how it is built, the key features it ships, and what accounts and tools you need to run your own instance."
+---
+
+Hero is an interactive map-based quiz platform that challenges players to identify historical and geographic locations by placing pins on a world map. It is built as a fully static site — there is no application server — served through EdgeOne Pages with serverless edge functions handling the small set of operations that need a trusted execution environment: admin authentication, AI chat, account recovery, push notifications, and the Canvas relay. All persistent state lives in Firebase (Firestore and Firebase Authentication). You fork the repository, configure a handful of files, connect it to EdgeOne Pages, and your own instance is live.
+
+## What Hero includes
+
+<CardGroup cols={2}>
+  <Card title="Game Modes" icon="map">
+    Two scored quiz tours — **1 Year** and **2 Year** — plus a co-operative **Daily Challenge** with shared leaderboards and streak tracking. Random-location practice sessions are also available when the `randomLocations` feature flag is enabled.
+  </Card>
+  <Card title="Clio AI" icon="sparkles">
+    An in-app AI study assistant powered by the Gemini API. Clio is gated behind a signed-in account and verifies the caller's Firebase ID token server-side before spending any API quota, so it cannot be invoked anonymously from outside the site.
+  </Card>
+  <Card title="Canvas Dashboard" icon="graduation-cap">
+    Students can link their Canvas LMS account (personal access token + school URL) from the Canvas tab. Requests are proxied through a same-origin EdgeOne relay to avoid CORS issues; credentials stay in page memory only and are never written to Firestore.
+  </Card>
+  <Card title="Username Accounts" icon="user">
+    Accounts use a 3–20 character username and password instead of email addresses. Firebase Authentication stores the username internally as a non-deliverable alias at the `accounts.hero.invalid` domain. New accounts receive a one-time recovery code.
+  </Card>
+  <Card title="Push Notifications" icon="bell">
+    Opt-in Web Push via Firebase Cloud Messaging HTTP v1. Users subscribe under **Settings → Notifications**; the admin panel sends announcements to opted-in browsers.
+  </Card>
+  <Card title="Map Boundaries" icon="globe">
+    Country, province, lake, marine, river, and historical polygon outlines sourced from Natural Earth v5.1.2 and `aourednik/historical-basemaps`. Boundaries are pre-built into `content/location-boundaries.geojson` and shipped with the static site — the browser does not fetch them from a CDN at runtime.
+  </Card>
+  <Card title="Admin Panel" icon="shield">
+    A steward-only panel (unlocked with `ADMIN_PASSWORD`) for quiz management, changelog publishing, dev mode, bulk actions, runtime bug review, feedback inbox, usage analytics, device bans, and triggering a redeploy via webhook.
+  </Card>
+  <Card title="Cache-Busted Deploys" icon="rotate">
+    `npm run build` stamps every local JS and CSS URL with a content hash. The HTML entry point is served `no-store`; JS and CSS are served immutable for one year. Open pages poll for a new build ID every 30 seconds and prompt users to reload when one is detected.
+  </Card>
+</CardGroup>
+
+## Technology stack
+
+| Layer | Technology |
+| --- | --- |
+| Hosting and CDN | EdgeOne Pages |
+| Serverless functions | EdgeOne edge functions (`edge-functions/api/`) |
+| Database | Cloud Firestore |
+| Authentication | Firebase Authentication (Email/Password — username aliases) |
+| AI | Google Gemini API (`/api/chat`) |
+| CSS framework | Tailwind CSS v3 |
+| Build tooling | Node.js scripts (`scripts/`) |
+
+## What you need to run your own instance
+
+Before you begin, make sure you have the following:
+
+- **GitHub account** — you will fork the repository and connect it to EdgeOne Pages for CI/CD deploys.
+- **Firebase project** — Firestore database, Email/Password authentication, and a web app registration. The same project provides the service-account credentials used by the edge functions.
+- **EdgeOne Pages account** — used for static hosting, edge functions, and environment variable storage.
+- **Gemini API key** *(optional)* — required only if you want to enable the Clio AI assistant (`features.clio: true` in `js/00-site-config.js`).
+
+<Note>
+  The Firebase **web app config** (the values in `js/02-firebase-config.js`) is public browser configuration by design. It is not a service-account credential. Keep service-account private keys, `ADMIN_PASSWORD`, `ACCOUNT_RECOVERY_PEPPER`, and any AI provider keys exclusively in EdgeOne environment variables — never in the repository or browser code.
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Fork the repo, configure Firebase and site settings, set EdgeOne environment variables, and deploy your first instance end-to-end.
+  </Card>
+  <Card title="Configuration Reference" icon="sliders" href="/configuration">
+    Full reference for every setting in `js/00-site-config.js`, `js/02-firebase-config.js`, and the EdgeOne environment variable table.
+  </Card>
+</CardGroup>

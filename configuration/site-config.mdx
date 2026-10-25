@@ -1,0 +1,129 @@
+---
+title: "Configure the Hero Site: SITE Object and Feature Flags"
+sidebarTitle: "Site Config"
+description: "A field-by-field reference for js/00-site-config.js — the single file that controls Hero's identity, launch timing, intro film, and feature flags."
+---
+
+Every Hero deployment begins with `js/00-site-config.js`. This file defines the `SITE` object, which controls the site's Firestore namespace, display name, version number, public launch time, intro film, and which optional features are active. All other source files read from this one place, so a site duplication or rebrand starts here. Changes take effect on the next build and deploy.
+
+## The SITE object
+
+The complete object as shipped in the repository is shown below. Edit the values directly in this file — there is no build step specific to this file, and no environment variable overrides these settings.
+
+```js
+// ===== EDIT SITE SETTINGS HERE =====
+// When you duplicate this repo, give it a new unique id and update the name.
+// The id namespaces this site's Firestore data when projects share one Firebase database.
+const SITE = {
+  id: 'hero-2026',
+  name: 'Hero',
+  version: '1.3.9.1',
+  tagline: 'STUDYING, REDEFINED.',
+
+  // Public opening time: 7:00 PM EDT (UTC-4) on October 21, 2026.
+  launchAt: '2026-10-21T23:00:00Z',
+
+  // Increase intro to replay the opening film for everyone. Optional: set a custom MP4 path.
+  intro: 4,
+  introVideo: 'media/hero-trailer.mp4', // Example: 'media/hero-intro.mp4'
+
+  // Turn features off here rather than removing their source files.
+  features: {
+    clio: true,
+    music: true,
+    tutorial: true,
+    cookies: true,
+    secrets: true,
+    flappyBird: true,
+    randomLocations: true,
+  },
+}
+
+// Site id is used by the Firestore paths throughout the app.
+window.__app_id = SITE.id;
+```
+
+## Field reference
+
+<ParamField path="id" type="string" required>
+  The Firestore namespace for this site's data. All Firestore documents are stored under `/artifacts/{id}/…`, so two Hero deployments that share a single Firebase project will stay isolated from each other as long as their `id` values differ.
+
+  The value is also written to `window.__app_id` at the bottom of the file and used throughout the app to construct every Firestore path. When duplicating the site, choose a new, unique value — changing `id` on a live deployment effectively orphans all existing Firestore documents under the old namespace.
+</ParamField>
+
+<ParamField path="name" type="string">
+  The human-readable site name displayed in the UI (page titles, admin panel, and other labelled surfaces). Defaults to `'Hero'`.
+</ParamField>
+
+<ParamField path="version" type="string">
+  The current site version string, for example `'1.3.9.1'`. This value is updated automatically by the release scripts — run `npm run release:patch`, `npm run release:minor`, or `npm run release:major` rather than editing it by hand. The VS Code Git commit hook also reads this field to prefix commit messages with the active version.
+</ParamField>
+
+<ParamField path="tagline" type="string">
+  A short phrase shown in the UI. The default is `'STUDYING, REDEFINED.'`. Update it for a rebrand without touching any other source file.
+</ParamField>
+
+<ParamField path="launchAt" type="string">
+  An ISO 8601 date-time string (UTC) that sets the public opening time for the site. Before this moment the app displays a countdown rather than the full quiz experience. The default value `'2026-10-21T23:00:00Z'` corresponds to 7:00 PM EDT on October 21, 2026. Set it to a past date to open immediately.
+</ParamField>
+
+<ParamField path="intro" type="number">
+  A monotonically increasing integer. The app records the last `intro` value a user has seen; incrementing this number causes the opening film to replay for everyone on their next visit. Decrementing or leaving it unchanged has no effect.
+</ParamField>
+
+<ParamField path="introVideo" type="string">
+  The path to the intro MP4 file, relative to the site root. Defaults to `'media/hero-trailer.mp4'`. Point this at a different file to swap the opening film without changing any other code.
+</ParamField>
+
+<ParamField path="features" type="object">
+  An object of boolean feature flags. Set a flag to `false` to disable that feature for all users without removing its source file. The available flags are:
+
+  | Flag | Default | Effect when `false` |
+  |---|---|---|
+  | `clio` | `true` | Hides the Clio AI chat panel |
+  | `music` | `true` | Removes the background music controls |
+  | `tutorial` | `true` | Skips the guided first-run tutorial |
+  | `cookies` | `true` | Disables the cookie/analytics consent banner |
+  | `secrets` | `true` | Hides the Lost Legends hidden-place discovery feature |
+  | `flappyBird` | `true` | Removes the Flappy Bird easter egg |
+  | `randomLocations` | `true` | Disables random-location quiz mode |
+</ParamField>
+
+## The window.__app_id global
+
+The last line of `js/00-site-config.js` assigns `SITE.id` to `window.__app_id`:
+
+```js
+window.__app_id = SITE.id;
+```
+
+Every subsequent script file — and the EdgeOne edge functions that need to look up Firestore documents — reads the namespace from `window.__app_id`. You should never hard-code the site ID anywhere else in the JavaScript source; always reference `window.__app_id` (in browser code) or the `FIREBASE_SITE_ID` environment variable (in server-side edge functions).
+
+## VS Code integration
+
+<Note>
+  Hero ships a VS Code extension that provides a graphical editor for the `SITE` object. Press **F5** in VS Code to launch the extension host, then click the **Hero** icon in the left Activity Bar to open the Hero Site Config Editor in the sidebar. The editor reads and writes `js/00-site-config.js` directly, so it is equivalent to editing the file by hand.
+</Note>
+
+## Duplicating the site
+
+When you fork or duplicate this repository to run a separate Hero deployment, the minimum required changes to `js/00-site-config.js` are:
+
+<Steps>
+  <Step title="Set a unique id">
+    Choose an `id` that does not collide with any other deployment sharing the same Firebase project. If you are using a dedicated Firebase project this matters less, but a descriptive, unique slug (for example `'hero-eastwood-2027'`) avoids any future confusion.
+  </Step>
+  <Step title="Update name and tagline">
+    Set `name` and `tagline` to match the new deployment's branding.
+  </Step>
+  <Step title="Set launchAt">
+    Update `launchAt` to the new site's public opening time, or set it to a past date to open immediately.
+  </Step>
+  <Step title="Update FIREBASE_SITE_ID">
+    Set the `FIREBASE_SITE_ID` EdgeOne environment variable to match the new `id` value so that server-side edge functions target the correct Firestore namespace.
+  </Step>
+</Steps>
+
+<Warning>
+  Changing `id` on an already-live deployment orphans all existing Firestore data stored under the old namespace. Plan any `id` change before the first production launch, not after.
+</Warning>

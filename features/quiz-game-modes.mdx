@@ -1,0 +1,234 @@
+---
+title: "Quiz Game Modes, Weak Spots, and Feature Flags"
+sidebarTitle: "Game Modes"
+description: "How Hero's Identify and Find game modes work, how weak spots are tracked in localStorage and Firestore, and which feature flags control quiz behavior."
+---
+
+Hero ships two interactive quiz modes—**Identify** and **Find**—that run against the same set of map locations. Missed locations are automatically tracked as weak spots, stored locally first and then synced to the player's Hero account in Firestore when they are signed in. Feature flags in `js/00-site-config.js` let you turn off random locations, ambient music, the tutorial, and other non-essential UI without touching any source file.
+
+## Game modes
+
+<Tabs>
+  <Tab title="Identify mode">
+    A marker is placed on the map and the player must type or select the correct place name. This is the default mode (`localStorage` key `hero_gm` stores `'identify'` when set, or defaults to `'identify'` when absent).
+
+    When the player answers incorrectly, `recordMiss(name)` is called immediately, incrementing that location's miss counter in both `localStorage` and—if the user is signed in—Firestore.
+
+    ```js
+    // Default game mode resolved at startup
+    let gameMode = localStorage.getItem('hero_gm') === 'find' ? 'find' : 'identify';
+    ```
+
+    A toast confirms the mode switch:
+
+    > *"Identify: tap a marker, then name it."*
+  </Tab>
+  <Tab title="Find mode">
+    The player is shown a place name in a banner (`#find-banner`) and must click the correct marker on the map. Locations are queued in random order in `findQueue`.
+
+    Scoring rewards accuracy:
+
+    | Mistakes on a location | Points awarded |
+    |---|---|
+    | 0 | 1 000 |
+    | 1 | 500 |
+    | 2 or more | 100 |
+
+    Each wrong click calls `recordMiss(name)` and shakes the banner with `badInput()`.
+
+    ```js
+    function findClick(marker, loc) {
+      const t = findQueue[0];
+      if (!t || marker._done) return;
+      if (loc.id === t.id) {
+        const mk = quizStats[t.id].mistakes;
+        points += mk === 0 ? 1000 : (mk === 1 ? 500 : 100);
+        // … mark solved, shift queue …
+      } else {
+        quizStats[t.id].mistakes++;
+        recordMiss(t.name);
+        badInput(document.getElementById('find-banner'));
+        showToast("Not that one. Try again!", 'error');
+      }
+    }
+    ```
+
+    A toast confirms the mode switch:
+
+    > *"Find the Land: you get a name, tap its marker."*
+  </Tab>
+</Tabs>
+
+Call `setGameMode('find')` or `setGameMode('identify')` from any JavaScript context to switch modes at runtime; the choice is persisted to `localStorage` under `hero_gm`.
+
+## Year mode
+
+`yearMode` scopes which location collection is loaded. Two values are supported:
+
+| Value | Collection shown |
+|---|---|
+| `'default'` | One-year tour |
+| `'twoyear'` | Two-year tour |
+
+Weak spots, leaderboards, and review queues are kept entirely separate between the two year modes. Switching year mode calls `setYearMode(k)`, which reloads the active location list and re-evaluates the weak-spot badge count.
+
+## Weak spots
+
+### localStorage key schema
+
+The `missKey` function derives the correct `localStorage` key based on the current year mode and whether the player has a Hero account:
+
+```js
+const missKey = (mode = yearMode, uid = missAccountUid) =>
+  uid ? `hero_miss_${mode}_account_${uid}` : 'hero_miss_' + mode;
+```
+
+| Player state | Example key |
+|---|---|
+| Anonymous | `hero_miss_default` |
+| Anonymous, two-year tour | `hero_miss_twoyear` |
+| Signed in (`uid = "abc123"`) | `hero_miss_default_account_abc123` |
+| Signed in, two-year tour | `hero_miss_twoyear_account_abc123` |
+
+Each value is a JSON object mapping place names to `{ n: <miss count>, t: <timestamp ms> }`:
+
+```json
+{
+  "Strait of Malacca": { "n": 3, "t": 1718200000000 },
+  "Tigris River":      { "n": 1, "t": 1718100000000 }
+}
+```
+
+### Firestore sync
+
+When a signed-in player misses a location, `recordMiss(name)` writes to `localStorage` immediately, then opens a Firestore transaction to the player's stats document:
+
+```
+artifacts/{siteId}/public/data/memberStats/{uid}
+```
+
+The document fields are:
+
+| Field | Year mode |
+|---|---|
+| `missesOneYear` | `'default'` |
+| `missesTwoYear` | `'twoyear'` |
+
+### Merging local and cloud copies
+
+`mergeMiss(...maps)` resolves conflicts by taking the **maximum** miss count and the **latest** timestamp for every location across all copies passed to it. This means a miss can never be silently lost when the same account is used on multiple devices.
+
+```js
+const mergeMiss = (...maps) => {
+  const merged = {};
+  maps.forEach(map =>
+    Object.entries(map || {}).forEach(([name, stat]) => {
+      const n = Math.max(Number(merged[name]?.n) || 0, Number(stat?.n) || 0);
+      const t = Math.max(Number(merged[name]?.t) || 0, Number(stat?.t) || 0);
+      if (n > 0) merged[name] = { n, t };
+    })
+  );
+  return merged;
+};
+```
+
+`reconcileMisses(uid, cloud)` is called automatically whenever the Firestore snapshot for `memberStats/{uid}` arrives. It merges the cloud data with the local copy and writes the result back to both, skipping the Firestore write when nothing has changed (`sameMiss` compares sorted serializations).
+
+### Legacy import
+
+On first sync after a player signs in, anonymous miss keys (`hero_miss_default`, `hero_miss_twoyear`) are merged into the signed-in keys. This happens once; `hero_miss_legacy_imported` is set to `'1'` in `localStorage` once the import is complete.
+
+### Reviewing weak spots
+
+The **Revisit the Forgotten** quiz mode filters `globalLocations` down to the player's top-missed places (up to 12, sorted by miss count then recency) and runs a standard quiz with only those locations. The weak-spot count badge on the review tab is updated by `missBadge()` after every miss and after every sync.
+
+## Random locations
+
+When the **Random Locations** toggle is enabled (`localStorage` key `hero_rand` = `'1'`), each quiz draws a random subset of 10–15 locations from the active pool instead of the full set:
+
+```js
+const picked = shuffled(pool).slice(0, Math.min(pool.length, 10 + Math.floor(Math.random() * 6)));
+```
+
+Random selection is skipped when the pool has five or fewer locations or when the Lost Legends collection is active. This feature is controlled by `SITE.features.randomLocations`.
+
+## Ambient music
+
+Hero generates procedural ambient music using the Web Audio API—no audio files are required. The music engine produces chord progressions from four static chord arrays, with sine and triangle oscillators routed through a low-pass filter and a feedback delay.
+
+Music starts only after the first user gesture (`pointerdown` or `keydown`) to satisfy browser autoplay policies. The engine suspends automatically when the page is hidden and resumes on visibility.
+
+<Note>
+  `prefs.music` defaults to `'on'` and `prefs.vol` defaults to `35` if neither has been set. Both values are stored in the site's preferences object and persisted via `applyPrefs()`.
+</Note>
+
+Music is controlled by `SITE.features.music`. When set to `false`, `prefs.music` is forced to `'off'` and the music toggle is hidden from the settings panel.
+
+## Tutorial
+
+The guided tour (`TUT`) walks a new player through eight steps, each pointing at a real UI element with a spotlight overlay. It navigates between views automatically and traps focus within the highlighted control plus the tour card buttons.
+
+```js
+window.tutMaybe = () => {
+  if (
+    !document.getElementById('intro') &&
+    !localStorage.getItem('hero_tut') &&
+    consent &&
+    document.getElementById('dev-screen').classList.contains('hidden') &&
+    document.getElementById('changelog-popup').classList.contains('hidden')
+  ) tutShow();
+};
+setTimeout(tutMaybe, 5200);
+```
+
+`tutMaybe` is the public entry point. It fires automatically 5.2 seconds after load on a player's first visit. Once the player finishes or skips the tour, `hero_tut` = `'1'` is set in `localStorage` and the tour never auto-starts again.
+
+When `SITE.features.tutorial` is `false`, `window.tutMaybe` is replaced with a no-op and the tour never runs.
+
+## Feature flags reference
+
+All flags live in `SITE.features` inside `js/00-site-config.js`. Set any value to `false` to disable the feature; the flags are read by `js/17-features.js` after all other scripts have loaded.
+
+```js
+// js/00-site-config.js
+const SITE = {
+  id: 'hero-2026',
+  features: {
+    clio:            true,  // Clio AI study guide
+    music:           true,  // Procedural ambient music
+    tutorial:        true,  // Guided first-run tour
+    cookies:         true,  // Cookie-consent banner
+    secrets:         true,  // Hidden Lost Legends locations
+    flappyBird:      true,  // Easter-egg Flappy Bird game
+    randomLocations: true,  // Random-subset quiz option
+  },
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="clio: false" icon="comment-slash">
+    Hides `#sherpa-fab`, `#sherpa-panel`, and the Clio nav button. Replaces `window.sherpaToggle` with a no-op so any call to open the panel is silently ignored.
+  </Card>
+  <Card title="music: false" icon="volume-xmark">
+    Forces `prefs.music` to `'off'` and calls `applyPrefs()`. Hides the `#sw-music` toggle from the settings panel.
+  </Card>
+  <Card title="tutorial: false" icon="graduation-cap">
+    Replaces `window.tutMaybe` with `() => {}` so the tour never auto-starts and cannot be launched manually.
+  </Card>
+  <Card title="randomLocations: false" icon="shuffle">
+    Hides the Random Locations chip (`label.st-chip:has(#rand-locs)`) from the settings panel so the player cannot enable random subsets.
+  </Card>
+  <Card title="cookies: false" icon="cookie-bite">
+    Sets `consent` to `'essential'` and hides `#cookie-banner`. Useful when operating under a deployment that does not require consent UI.
+  </Card>
+  <Card title="secrets: false" icon="eye-slash">
+    Replaces `secretAsk` and `fbSecret` with functions that always return `false`, disabling the Lost Legends unlock flow entirely.
+  </Card>
+  <Card title="flappyBird: false" icon="gamepad">
+    Wraps `secretAsk` so attempts to trigger Flappy Bird via its secret phrase return `false`. Other secrets remain unaffected.
+  </Card>
+</CardGroup>
+
+<Warning>
+  Feature flags are evaluated once at page load by `js/17-features.js`. Changing `SITE.features` in the browser console after load has no effect—redeploy to apply changes to all visitors.
+</Warning>

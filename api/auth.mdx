@@ -1,0 +1,140 @@
+---
+title: "Verify Admin Password and Obtain a Signed Session Token"
+sidebarTitle: "POST /api/auth"
+description: "Authenticate as admin or dev by submitting a password; receive a short-lived HMAC-signed token used to authorize subsequent admin-only endpoints."
+---
+
+`POST /api/auth` is the entry point for all privileged operations in Hero. It accepts a target role and a password, verifies the password with a constant-time comparison against the corresponding environment variable, and — for the `admin` target — returns a short-lived signed token. That token is then presented to endpoints like `POST /api/deploy` and `POST /api/push-announcement` in place of the raw password. No authentication is required to call this endpoint itself.
+
+## Request
+
+**Method:** `POST`  
+**Path:** `/api/auth`  
+**Content-Type:** `application/json`  
+**Authentication:** None
+
+### Body parameters
+
+<ParamField body="target" type="string" required>
+  The role to authenticate as. Accepted values:
+
+  - `"admin"` — grants a signed token for admin-only endpoints such as `/api/deploy` and `/api/push-announcement`. Verified against the `ADMIN_PASSWORD` environment variable.
+  - `"dev"` — verifies dev/early-access access. Verified against `DEV_ACCESS` (or the legacy `DEV_PASSWORD` fallback). Returns `{ok: true}` without a token on success.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The password to verify. Maximum 200 characters. Passwords longer than 200 characters are rejected with `bad_request` before any comparison is attempted.
+</ParamField>
+
+## Responses
+
+### 200 — Authenticated (dev target)
+
+```json
+{ "ok": true }
+```
+
+### 200 — Authenticated (admin target)
+
+```json
+{ "ok": true, "token": "1751500000000.a3f8c2..." }
+```
+
+<ResponseField name="ok" type="boolean">
+  Always `true` on success.
+</ResponseField>
+
+<ResponseField name="token" type="string">
+  Present only when `target` is `"admin"`. A short-lived signed token of the form `<expiry_ms>.<sha256-hmac>`. The expiry is a Unix millisecond timestamp 30 minutes in the future. The HMAC is computed as `HMAC-SHA-256(ADMIN_PASSWORD, "admin.<expiry_ms>")` and encoded as a lowercase hex string. Pass the full value as `Authorization: Bearer <token>` on `/api/deploy`, or include it as the `token` field in the `/api/deploy` and `/api/push-announcement` request bodies.
+</ResponseField>
+
+### 401 — Wrong password
+
+```json
+{ "ok": false }
+```
+
+A deliberate 500 ms delay is added before returning this response to slow brute-force attempts.
+
+### 400 — Bad request
+
+```json
+{ "ok": false, "error": "bad_request" }
+```
+
+```json
+{ "ok": false, "error": "bad_target" }
+```
+
+### 500 — Not configured
+
+```json
+{ "ok": false, "error": "not_configured" }
+```
+
+## Error codes
+
+| Code | HTTP | Cause |
+|------|------|-------|
+| `bad_request` | 400 | Request body could not be parsed as JSON, or `password` is not a string or exceeds 200 characters |
+| `bad_target` | 400 | `target` is not `"admin"` or `"dev"` |
+| `not_configured` | 500 | The environment variable for the requested target is not set (`ADMIN_PASSWORD` for `admin`, `DEV_ACCESS`/`DEV_PASSWORD` for `dev`) |
+| *(no error field)* | 401 | Password did not match; response is `{"ok": false}` with no `error` key |
+
+<Warning>
+  The 401 response intentionally omits an `error` key to avoid confirming whether the target or the password was wrong. Failed attempts always incur a 500 ms server-side delay. Do not implement a retry loop around this endpoint.
+</Warning>
+
+<Note>
+  Admin tokens expire after 30 minutes. If an admin token is rejected with `unauthorized` by a downstream endpoint, call `POST /api/auth` again to obtain a fresh token.
+</Note>
+
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ADMIN_PASSWORD` | Yes (for `target: "admin"`) | The admin password. Used both as the expected credential and as the HMAC key for the signed token. |
+| `DEV_ACCESS` | Yes (for `target: "dev"`) | The dev/early-access password. `DEV_PASSWORD` is accepted as a legacy fallback. |
+
+## Examples
+
+### Authenticate as admin
+
+```bash
+curl -s -X POST https://example.com/api/auth \
+  -H "Content-Type: application/json" \
+  -d '{"target": "admin", "password": "your-admin-password"}'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "token": "1751500000000.a3f8c2d1e4b5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+}
+```
+
+### Authenticate as dev
+
+```bash
+curl -s -X POST https://example.com/api/auth \
+  -H "Content-Type: application/json" \
+  -d '{"target": "dev", "password": "your-dev-password"}'
+```
+
+**Response:**
+
+```json
+{ "ok": true }
+```
+
+### Handle a wrong password
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" -X POST https://example.com/api/auth \
+  -H "Content-Type: application/json" \
+  -d '{"target": "admin", "password": "wrong"}'
+```
+
+**Response:** HTTP `401` with body `{"ok":false}` (after a 500 ms delay).

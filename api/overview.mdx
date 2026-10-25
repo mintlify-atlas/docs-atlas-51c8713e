@@ -1,0 +1,65 @@
+---
+title: "Hero Edge Function API — Complete Reference Overview"
+sidebarTitle: "Overview"
+description: "All Hero server-side endpoints, their auth requirements, content-type conventions, and where secrets are stored in EdgeOne Pages environment variables."
+---
+
+Hero's server-side logic runs as EdgeOne serverless edge functions located in `edge-functions/api/`. Every endpoint is mounted under `/api/` and is deployed automatically alongside the static site. This reference covers all seven endpoints, their authentication models, request and response shapes, and the environment variables they require.
+
+## Content type and caching
+
+Every request body must be `application/json` and every response is `application/json` (except streaming chat, which is `text/event-stream`). All responses include `Cache-Control: no-store` — neither the browser nor any intermediate CDN layer caches endpoint responses.
+
+## Authentication models
+
+Hero uses two distinct authentication schemes depending on whether the caller is a browser user or an admin operator.
+
+**Firebase ID token (user endpoints).** The browser obtains a short-lived ID token from Firebase Authentication after a successful sign-in, then sends it in every request as `Authorization: Bearer <id-token>`. The edge function verifies the token server-side by calling Firebase's Identity Toolkit API using the `FIREBASE_API_KEY` environment variable. This keeps Gemini quota and account operations limited to signed-in Hero accounts.
+
+**HMAC admin token (admin endpoints).** An operator calls `POST /api/auth` with the admin password and receives a short-lived token of the form `<expiry_ms>.<sha256-hmac>`. That token is valid for 30 minutes and is passed in subsequent admin requests — either in the `Authorization` header or in the request body, depending on the endpoint. The HMAC is computed with `ADMIN_PASSWORD` as the key, so it cannot be forged without the secret.
+
+**No authentication.** A small number of endpoints (`GET /api/chat`, `GET /api/push-config`) return only public configuration information and require no credentials.
+
+## Secrets and environment variables
+
+All secrets are read from `context.env` inside the edge function at request time. They are never embedded in browser-accessible JavaScript files. The Firebase web config value `FIREBASE_API_KEY` is intentionally public — it is the same key already present in `js/02-firebase-config.js` and is used server-side only to validate caller identity. Service-account private keys (`FIREBASE_PRIVATE_KEY_1…N`), `ADMIN_PASSWORD`, `GEMINI_API_KEY`, `GITHUB_TOKEN`, and `DEPLOY_WEBHOOK_URL` are private and must only be set in the EdgeOne Pages project settings.
+
+<Note>
+  Because EdgeOne environment variables are not readable from browser JavaScript, `FIREBASE_API_KEY` must be added as a separate environment variable even though its value matches the public web config. It is not a secret, but the edge runtime needs its own copy.
+</Note>
+
+## Endpoint index
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/auth` | None | Verify admin or dev password; receive a short-lived signed token |
+| `GET` | `/api/chat` | None | Check whether Gemini is configured and list available models |
+| `POST` | `/api/chat` | Firebase ID token | Send a message to Clio, the history/geography AI study guide |
+| `POST` | `/api/canvas` | Firebase Bearer + same-origin | Relay a read-only Canvas LMS API request past CORS restrictions |
+| `POST` | `/api/deploy` | Admin HMAC token (body) | Create an empty Git commit and trigger an EdgeOne redeploy webhook |
+| `POST` | `/api/push-announcement` | Admin HMAC token (body) | Send a Web Push notification to all opted-in browsers |
+| `GET` | `/api/push-config` | None | Return the VAPID public key for Web Push subscription creation |
+| `POST` | `/api/account-recovery` | Firebase ID token (save) / None (recover) | Save or verify one-time account recovery codes |
+
+## Environment variable summary
+
+The table below lists every environment variable consumed by the API layer. Set them in the EdgeOne Pages project settings. Never commit real values to the repository.
+
+| Variable | Required for | Notes |
+|----------|-------------|-------|
+| `ADMIN_PASSWORD` | `/api/auth`, `/api/deploy`, `/api/push-announcement` | Signs and verifies admin HMAC tokens |
+| `DEV_ACCESS` | `/api/auth` | Dev/early-access password; `DEV_PASSWORD` accepted as a legacy fallback |
+| `FIREBASE_API_KEY` | `/api/chat`, `/api/account-recovery` | Public Firebase web API key; used server-side to verify ID tokens |
+| `FIREBASE_CLIENT_EMAIL` | `/api/push-announcement`, `/api/account-recovery` | Firebase service-account email |
+| `FIREBASE_PRIVATE_KEY_1…N` | `/api/push-announcement`, `/api/account-recovery` | Service-account private key in up to 12 chunks of ≤ 450 chars; a single `FIREBASE_PRIVATE_KEY` is also supported |
+| `FIREBASE_PROJECT_ID` | `/api/push-announcement`, `/api/account-recovery` | Optional if derivable from `FIREBASE_CLIENT_EMAIL` |
+| `ACCOUNT_RECOVERY_PEPPER` | `/api/account-recovery` | 64-char hex secret used to HMAC recovery codes; never reuse |
+| `FIREBASE_SITE_ID` | `/api/account-recovery` | Firestore namespace; defaults to `hero-2026` |
+| `GEMINI_API_KEY` | `/api/chat` | Enables the Clio AI study guide |
+| `GEMINI_MODEL` | `/api/chat` | Overrides the default model preference list |
+| `FIREBASE_WEB_PUSH_VAPID_KEY` | `/api/push-config`, `/api/push-announcement` | Public VAPID key from Firebase Console → Cloud Messaging |
+| `DEPLOY_WEBHOOK_URL` | `/api/deploy` | EdgeOne build/deploy webhook URL |
+| `GITHUB_TOKEN` | `/api/deploy` | GitHub token with repository contents read/write access |
+| `GITHUB_REPOSITORY` | `/api/deploy` | Repository as `owner/name` |
+| `DEPLOY_BRANCH` | `/api/deploy` | Branch to commit to; defaults to `main` |
+| `CANVAS_ALLOWED_HOSTS` | `/api/canvas` | Comma- or space-separated extra Canvas hostnames beyond `*.instructure.com` |

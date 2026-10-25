@@ -1,0 +1,99 @@
+{
+  "projectType": "saas",
+  "projectName": "Hero",
+  "projectDescription": "Hero is a map-based geography and history quiz web app built as a static site with Firebase and EdgeOne serverless functions, featuring AI-assisted study tools, Canvas LMS integration, and user accounts.",
+  "theme": "luma",
+  "primaryColor": "#1e3a6e",
+  "lightColor": "#d4af37",
+  "darkColor": "#0a0e1a",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "project-structure"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/site-config",
+              "configuration/firebase-setup",
+              "configuration/environment-variables"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/quiz-game-modes",
+              "features/clio-ai",
+              "features/canvas-integration",
+              "features/accounts",
+              "features/push-notifications",
+              "features/map-boundaries"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/edgeone-deploy",
+              "deployment/versioning-css",
+              "deployment/steward-redeploy"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Edge Functions",
+            "pages": [
+              "api/overview",
+              "api/auth",
+              "api/chat",
+              "api/canvas",
+              "api/deploy",
+              "api/push-announcement",
+              "api/push-config",
+              "api/account-recovery"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Map-based geography and history quiz with identify and find game modes",
+    "Clio AI study guide powered by Google Gemini with image upload support",
+    "Canvas LMS integration for grades, assignments, and announcements",
+    "Username-based account system with private one-time recovery codes",
+    "Weak spots tracking synced to Firebase Firestore",
+    "Push notifications via Firebase Cloud Messaging",
+    "Curated GeoJSON map boundaries from Natural Earth and historical datasets",
+    "Admin/Steward panel with dev mode, announcements, and remote redeploy",
+    "Feature flags to enable/disable individual app features",
+    "Tailwind CSS theming with dark mode support"
+  ],
+  "publicApiSurface": [
+    "POST /api/auth — admin and dev-access password verification, returns signed admin token",
+    "POST /api/chat — Gemini-powered AI chat (Clio), requires Firebase ID token",
+    "GET /api/chat — config check (no secrets exposed)",
+    "POST /api/canvas — same-origin relay for Canvas LMS read-only API requests",
+    "POST /api/deploy — create empty Git commit and trigger EdgeOne redeploy webhook",
+    "POST /api/push-announcement — send FCM push notification to opted-in browsers",
+    "GET /api/push-config — return VAPID public key for Web Push subscription",
+    "POST /api/account-recovery — save or verify one-time username account recovery codes",
+    "window.__heroOpenAccountDialog() — open sign-in / account dialog",
+    "window.__heroShowAuthGate() — open auth dialog from a blocked view",
+    "window.__heroRegionHint(loc) — return region hint string for a quiz location",
+    "window.__heroSendAnnouncementPush(title, body) — send push from admin session",
+    "window.__heroDeviceProfiles — device profile map for admin tooling",
+    "SITE object in js/00-site-config.js — site name, id, version, tagline, feature flags"
+  ]
+}

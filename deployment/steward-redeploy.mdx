@@ -1,0 +1,146 @@
+---
+title: "Trigger a New Deployment from the Steward Panel"
+sidebarTitle: "Steward Redeploy"
+description: "How the Steward redeploy card works, required environment variables, how to obtain an admin token, and what every error code from POST /api/deploy means."
+---
+
+The Steward (admin) panel includes a **Deploy** card that lets an authorized steward start a new EdgeOne build without opening a terminal or pushing a commit from their local machine. When triggered, the edge function creates an empty Git commit on the configured branch — advancing HEAD without modifying any files — and then calls the EdgeOne build webhook. EdgeOne detects the new commit and starts a fresh deployment exactly as it would for any other push.
+
+## Required environment variables
+
+Set these in the EdgeOne Pages project settings before using the redeploy feature. The GitHub token is read exclusively inside the edge function and is never sent to the browser.
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `ADMIN_PASSWORD` | Yes | — | Authenticates the steward and signs admin session tokens |
+| `DEPLOY_WEBHOOK_URL` | Yes | — | EdgeOne build/deploy webhook URL for this Pages project |
+| `GITHUB_TOKEN` | Yes | — | GitHub token with repository contents read and write access |
+| `GITHUB_REPOSITORY` | Yes | — | Repository as `owner/name`, e.g. `crwcln/heroapp` |
+| `DEPLOY_BRANCH` | No | `main` | Branch to commit to and trigger a build from |
+
+<Warning>
+  `GITHUB_REPOSITORY` has no automatic default. If it is not set, the endpoint returns `not_configured` rather than committing to an unintended repository.
+</Warning>
+
+## How the redeploy works
+
+The `POST /api/deploy` edge function performs the following steps in order:
+
+<Steps>
+  <Step title="Validate configuration">
+    The function checks that `ADMIN_PASSWORD`, `DEPLOY_WEBHOOK_URL`, `GITHUB_TOKEN`, and `GITHUB_REPOSITORY` are all set and that the repository and branch names pass format validation. Missing or malformed values return an error before any GitHub call is made.
+  </Step>
+
+  <Step title="Verify the admin token">
+    The request body must contain a valid `token` issued by `POST /api/auth`. Tokens expire after 30 minutes. An expired or tampered token returns `unauthorized`.
+  </Step>
+
+  <Step title="Validate the commit message">
+    The `message` field must be a non-empty string, 120 characters or fewer, with no newline characters (`\r` or `\n`). Invalid messages return `invalid_message`.
+  </Step>
+
+  <Step title="Create an empty Git commit">
+    The function fetches the current HEAD SHA of the configured branch, reads the parent commit's tree SHA, and creates a new commit pointing to the same tree. This advances the branch without changing any files:
+
+    ```js
+    // Simplified from edge-functions/api/deploy.js
+    const ref    = await gh(`git/ref/heads/${branch}`);
+    const parent = await gh(`git/commits/${ref.object.sha}`);
+    const commit = await gh('git/commits', {
+      method: 'POST',
+      body: JSON.stringify({
+        message,
+        tree: parent.tree.sha,
+        parents: [ref.object.sha],
+      }),
+    });
+    await gh(`git/refs/heads/${branch}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ sha: commit.sha, force: false }),
+    });
+    ```
+  </Step>
+
+  <Step title="Call the EdgeOne webhook">
+    After the branch is advanced, the function sends a `POST` to `DEPLOY_WEBHOOK_URL`. A 2xx response means EdgeOne has accepted the build request. Check **Build & Deploy** in the EdgeOne console for the actual build result — a successful webhook response does not guarantee a successful build.
+  </Step>
+</Steps>
+
+## Getting an admin token
+
+The redeploy endpoint requires a short-lived admin token rather than the raw password. Obtain one by posting to the auth endpoint:
+
+```http
+POST /api/auth
+Content-Type: application/json
+
+{
+  "target": "admin",
+  "password": "<ADMIN_PASSWORD value>"
+}
+```
+
+A successful response includes a `token` string:
+
+```json
+{
+  "ok": true,
+  "token": "1748000000000.a3f9c2..."
+}
+```
+
+The token encodes an expiry timestamp and an HMAC signature. It is valid for **30 minutes** from the time it was issued. Pass it as `token` in the `POST /api/deploy` request body. The admin panel handles this exchange automatically — you only need to call the auth endpoint directly when integrating programmatically.
+
+## Triggering a redeploy
+
+Once you have a valid token, call the deploy endpoint:
+
+```http
+POST /api/deploy
+Content-Type: application/json
+
+{
+  "token": "<admin token from /api/auth>",
+  "message": "Redeploy: update quiz content"
+}
+```
+
+A successful response returns the new commit SHA, the commit message, and the branch:
+
+```json
+{
+  "ok": true,
+  "commitSha": "a1b2c3d4e5f6...",
+  "commitMessage": "Redeploy: update quiz content",
+  "branch": "main"
+}
+```
+
+## Error reference
+
+| `error` value | HTTP status | Meaning |
+|---|---|---|
+| `not_configured` | 500 | One or more required environment variables are missing. The `missing` array lists which ones. |
+| `invalid_deploy_config` | 500 | `GITHUB_REPOSITORY` or `DEPLOY_BRANCH` failed format validation. Allowed characters: `A–Z`, `a–z`, `0–9`, `_`, `.`, `-`; repository must contain exactly one `/`. |
+| `unauthorized` | 401 | The admin token is expired, missing, or was signed with a different `ADMIN_PASSWORD`. |
+| `invalid_message` | 400 | The commit message is empty, longer than 120 characters, or contains a newline character. |
+| `github_failed` | varies | The GitHub API returned an error before the branch was advanced. No commit was created. |
+| `hook_failed` | 502 | The empty commit was created and the branch was advanced, but the EdgeOne webhook returned a non-2xx status. The `commitSha` field contains the SHA of the dangling commit. |
+| `hook_unreachable` | 502 | The branch was advanced but the webhook request itself failed (network error or timeout). The `commitSha` field contains the SHA. |
+
+<Note>
+  When `hook_failed` or `hook_unreachable` is returned, the Git branch has already been updated. You can trigger the build manually from the EdgeOne console, or push another commit to advance the branch again. The empty commit is a valid part of your repository history.
+</Note>
+
+## Construction-page visitor message
+
+When Dev Mode is active, visitors see a construction page. The message displayed on that page can be edited without a new deployment: sign in to the admin panel, open the **Dev Mode** card, and update the **Visitor construction message** field. Leave the field blank to restore the default message.
+
+<CardGroup cols={2}>
+  <Card title="Token lifetime" icon="clock">
+    Admin tokens expire after 30 minutes. If the redeploy form returns `unauthorized`, sign in to the admin panel again to get a fresh token.
+  </Card>
+  <Card title="GitHub token scope" icon="key">
+    `GITHUB_TOKEN` needs read and write access to repository contents. It is used only inside the edge function and is never exposed to the browser or included in any response body.
+  </Card>
+</CardGroup>

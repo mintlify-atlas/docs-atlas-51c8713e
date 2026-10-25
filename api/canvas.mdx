@@ -1,0 +1,129 @@
+---
+title: "Relay Read-Only Canvas LMS Requests Past CORS Restrictions"
+sidebarTitle: "POST /api/canvas"
+description: "Same-origin server-side relay for Canvas LMS API reads; forwards the student's personal access token and returns JSON responses with Link pagination headers."
+---
+
+`POST /api/canvas` is a same-origin relay that forwards read-only Canvas LMS API requests from the browser to a student's Canvas instance. Because Canvas schools frequently serve their LMS from a different origin than Hero, browsers block direct `fetch()` calls to Canvas API endpoints. This relay runs server-side, so the CORS restriction does not apply. The student's Canvas personal access token is forwarded in memory only — it is never logged or persisted by the edge function.
+
+The relay enforces same-origin access so it cannot be called from external scripts or other sites, and it validates the target URL to ensure it points to a legitimate Canvas API path on an allowed host. Only `GET` requests are made to Canvas; the relay cannot write to Canvas on behalf of a student.
+
+<Warning>
+  This endpoint does not verify the caller's Firebase session. It relies entirely on same-origin enforcement and Canvas personal access token validation. Ensure your Firestore rules and deployment settings do not create additional CORS exposure.
+</Warning>
+
+## Request
+
+**Method:** `POST`  
+**Path:** `/api/canvas`  
+**Content-Type:** `application/json`  
+**Authentication:** Canvas personal access token via `Authorization: Bearer` header; same-origin `Origin` header required
+
+### Headers
+
+<ParamField header="Origin" type="string" required>
+  Must be present and must exactly match the origin of the request URL. The edge function computes the expected origin from `context.request.url` and rejects any mismatch. This enforces that the call is made from the same Hero deployment and cannot originate from a cross-origin script.
+</ParamField>
+
+<ParamField header="Authorization" type="string" required>
+  The student's Canvas personal access token in the form `Bearer <token>`. The token is forwarded directly to Canvas and must not exceed 4096 characters. It is never stored or logged by the relay.
+</ParamField>
+
+### Body parameters
+
+<ParamField body="url" type="string" required>
+  The absolute Canvas API URL to fetch. Maximum 4096 characters. The URL must satisfy all of the following rules:
+
+  - Protocol must be `https:`
+  - No username or password embedded in the URL
+  - No hash fragment
+  - Path must begin with `/api/v1/`
+  - Hostname must not be a bare IPv4 address (e.g., `192.168.1.1` is rejected)
+  - Hostname must be `instructure.com`, a subdomain of `instructure.com`, or listed in the `CANVAS_ALLOWED_HOSTS` environment variable
+</ParamField>
+
+## Allowed Canvas hosts
+
+`*.instructure.com` (including `instructure.com` itself) is always permitted. To allow a school's custom Canvas domain, add its exact hostname to the `CANVAS_ALLOWED_HOSTS` environment variable as a comma- or space-separated list.
+
+```
+CANVAS_ALLOWED_HOSTS=canvas.myschool.edu, canvas.district.k12.us
+```
+
+<Note>
+  Only exact hostnames are supported in `CANVAS_ALLOWED_HOSTS` — wildcards are not expanded. If a school uses `canvas.example.edu` add that exact value.
+</Note>
+
+## Upstream request
+
+The relay makes a single `GET` request to the validated Canvas URL with a 15-second timeout. It forwards:
+
+- `Authorization: Bearer <canvas-token>`
+- `Accept: application/json`
+
+Redirects are not followed. If Canvas returns a `3xx` status the relay returns `canvas_redirect`.
+
+## Response
+
+On success, the relay returns the raw Canvas response body with:
+
+- The original Canvas HTTP status code
+- `Content-Type` from Canvas (preserved exactly)
+- `Cache-Control: no-store`
+- `Link` header forwarded from Canvas when present (used for pagination)
+
+The `Link` header follows the standard [RFC 8288](https://www.rfc-editor.org/rfc/rfc8288) format that Canvas uses for cursor and offset pagination.
+
+<ResponseField name="(Canvas response body)" type="object">
+  The parsed Canvas JSON response, passed through unmodified. The relay does not transform or filter the Canvas payload.
+</ResponseField>
+
+## Error codes
+
+| Code | HTTP | Cause |
+|------|------|-------|
+| `bad_request` | 400 | Request body is not valid JSON, `url` is not a string, `url` exceeds 4096 chars, or the `Authorization` header is missing or malformed |
+| `same_origin_required` | 403 | `Origin` header is absent or does not match the request's own origin |
+| `bad_canvas_url` | 400 | `url` fails URL parsing, uses a non-HTTPS scheme, contains credentials or a hash fragment, or the path does not start with `/api/v1/`, or the hostname is an IP literal |
+| `canvas_host_not_allowed` | 403 | The hostname is not `*.instructure.com` and is not listed in `CANVAS_ALLOWED_HOSTS` |
+| `canvas_timeout` | 504 | The upstream Canvas request exceeded the 15-second timeout |
+| `canvas_unreachable` | 502 | A network error prevented the relay from reaching Canvas; includes a `cause` field with the underlying error code |
+| `canvas_redirect` | 502 | Canvas responded with a 3xx redirect; the relay does not follow redirects |
+| `canvas_non_json_response` | 502 | Canvas responded with a non-JSON content type; includes `upstreamStatus` and `contentType` fields |
+
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CANVAS_ALLOWED_HOSTS` | No | Comma- or space-separated exact hostnames for custom Canvas domains beyond `*.instructure.com` |
+
+## Example
+
+```bash
+curl -s -X POST https://example.com/api/canvas \
+  -H "Content-Type: application/json" \
+  -H "Origin: https://example.com" \
+  -H "Authorization: Bearer 1234~your-canvas-personal-access-token" \
+  -d '{
+    "url": "https://myschool.instructure.com/api/v1/courses?enrollment_state=active&per_page=50"
+  }'
+```
+
+**Successful response** (passes through Canvas's JSON directly):
+
+```json
+[
+  {
+    "id": 12345,
+    "name": "World History",
+    "course_code": "HIST-101",
+    "enrollment_term_id": 3
+  }
+]
+```
+
+The response will include a `Link` header when Canvas provides pagination:
+
+```
+Link: <https://myschool.instructure.com/api/v1/courses?page=2&per_page=50>; rel="next"
+```

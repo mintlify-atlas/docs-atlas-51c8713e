@@ -1,0 +1,259 @@
+---
+title: "Username Accounts, Roles, and Recovery in Hero"
+sidebarTitle: "Accounts"
+description: "How Hero's username-based account system works: Firebase Auth aliases, one-time recovery codes, score-based roles, and deployment prerequisites."
+---
+
+Hero accounts are built entirely on usernames rather than email addresses or social sign-in. Under the hood, Firebase Auth stores each username as an internal alias at the `accounts.hero.invalid` domain — a reserved, non-deliverable address that users never see or type. This approach keeps accounts private by design while reusing Firebase's proven authentication infrastructure.
+
+## Username rules
+
+A valid Hero username is **3–20 characters** drawn from `A–Z`, `a–z`, `0–9`, and underscore (`_`). Usernames are case-insensitive: `PandaCoder42` and `pandacoder42` map to the same account. The same pattern is enforced in the browser (`js/20-user-identity.js`) and on the server (`edge-functions/api/account-recovery.js`):
+
+```js
+const USERNAME_PATTERN = /^[a-zA-Z0-9_]{3,20}$/;
+```
+
+<Warning>
+  Do **not** use a real name, school ID, or any identifying information as a username. The account dialog reminds users of this when they register.
+</Warning>
+
+Internally, every username becomes a Firebase email alias using the reserved domain:
+
+```js
+const ACCOUNT_DOMAIN = 'accounts.hero.invalid';
+function usernameEmail(username) {
+  return `${username.toLowerCase()}@${ACCOUNT_DOMAIN}`;
+}
+```
+
+Users sign in with their username and password only. **Legacy email and Google accounts are not migrated** and cannot sign in through the site.
+
+## Account creation flow
+
+When a new account is created, Hero performs these steps atomically and rolls back if any step fails:
+
+<Steps>
+  <Step title="Create the Firebase Auth user">
+    `auth.createUserWithEmailAndPassword(usernameEmail(username), password)` — the browser SDK creates the account using the internal alias.
+  </Step>
+  <Step title="Write the member profile">
+    A document is written to `artifacts/{siteId}/public/data/members/{uid}` with `userId`, `name`, `username`, and `recoveryReady: false`.
+  </Step>
+  <Step title="Generate and save the recovery code">
+    A one-time recovery code is generated and its HMAC is saved via `POST /api/account-recovery` with `{ action: "save" }`. The plaintext code is never stored.
+  </Step>
+  <Step title="Mark recovery ready">
+    The member document is updated to `recoveryReady: true`. This flag is what prevents the setup from running again on the next sign-in.
+  </Step>
+  <Step title="Display the recovery code once">
+    The code is shown in the account dialog. It cannot be retrieved after the user dismisses the screen.
+  </Step>
+</Steps>
+
+If any step from step 2 onward fails, Hero attempts a full rollback: deletes the recovery record, deletes the member document, and deletes the Firebase Auth user before signing out.
+
+## Recovery codes
+
+The one-time recovery code is **20 random bytes formatted as 5 groups of 4 hex characters**, separated by hyphens — for example:
+
+```text
+ABCD-EF01-2345-6789-AB12
+```
+
+Generated client-side using the Web Crypto API:
+
+```js
+function newRecoveryCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(20));
+  return [...bytes]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase()
+    .match(/.{1,4}/g)
+    .join('-');
+}
+```
+
+The server stores only the HMAC-SHA-256 of the code (keyed with `ACCOUNT_RECOVERY_PEPPER`) — never the plaintext. Comparison is done in constant time to resist timing attacks.
+
+### Recovery API
+
+The account-recovery edge function lives at `POST /api/account-recovery`. It accepts three actions:
+
+<Tabs>
+  <Tab title="save">
+    Stores the HMAC of a new recovery code. Requires a valid Firebase ID token in the `Authorization: Bearer` header belonging to the username being registered.
+
+    ```json
+    {
+      "action": "save",
+      "username": "pandacoder42",
+      "recoveryCode": "ABCDEF01234567..."
+    }
+    ```
+  </Tab>
+  <Tab title="reset">
+    Verifies the recovery code and resets the account password. No auth token is required — the code itself is the credential.
+
+    ```json
+    {
+      "action": "reset",
+      "username": "pandacoder42",
+      "recoveryCode": "ABCDEF01234567...",
+      "password": "newpassword123"
+    }
+    ```
+
+    On success, the recovery record is invalidated before the password is changed. If the Firebase password update fails, the original code hash is restored automatically.
+  </Tab>
+  <Tab title="delete">
+    Removes the recovery record on account deletion. Requires a valid ID token for the account owner.
+
+    ```json
+    {
+      "action": "delete",
+      "username": "pandacoder42"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+A `GET /api/account-recovery` returns `{ "configured": true }` or `{ "configured": false }` so the client can surface a helpful error before attempting a save.
+
+<Note>
+  The `accountRecovery` Firestore collection is locked to client reads and writes by `firestore.rules` — only the edge function's service account token can access it.
+
+  ```
+  match /accountRecovery/{username} {
+    allow read, write: if false;
+  }
+  ```
+</Note>
+
+## Score-based roles
+
+Every signed-in member has a role determined by their best quiz score. Roles are computed on the fly from the `leaderboard` and `leaderboardTwoYear` collections — they are never stored on the profile document.
+
+| Role | Minimum score |
+|------|--------------|
+| Explorer | 0 |
+| Scout | 1,000 |
+| Cartographer | 5,000 |
+| Historian | 15,000 |
+| Legend | 30,000 |
+
+The lookup in `js/20-user-identity.js`:
+
+```js
+const ROLES = [
+  [30000, 'Legend'],
+  [15000, 'Historian'],
+  [5000, 'Cartographer'],
+  [1000, 'Scout'],
+  [0, 'Explorer'],
+];
+const roleFor = (score) =>
+  (ROLES.find(([min]) => score >= min) || ROLES[ROLES.length - 1])[1];
+```
+
+## Firestore paths
+
+<CardGroup cols={2}>
+  <Card title="Member profile" icon="user">
+    `artifacts/{siteId}/public/data/members/{uid}`
+
+    Stores `userId`, `name`, `username`, `recoveryReady`, `updatedAt`, and an optional inline JPEG `photoURL` (≤ 150 KB, base64).
+  </Card>
+  <Card title="Member stats" icon="chart-bar">
+    `artifacts/{siteId}/public/data/memberStats/{uid}`
+
+    Stores `missesOneYear` and `missesTwoYear` maps — location IDs the member has missed, used to surface weak spots on the profile page.
+  </Card>
+</CardGroup>
+
+Firestore rules allow a member to read and write only their own document. Admins can list all documents. Roles and achievements are never accepted from client writes — they are always calculated server-side or in the browser from raw score data.
+
+## Auth state event
+
+All UI in `js/20-user-identity.js` is a pure function of the `hero-auth-state` custom DOM event. The event is fired by `applyFirebaseUser` in `js/04-app-core.js` whenever auth state changes:
+
+```js
+window.addEventListener('hero-auth-state', (e) => {
+  // e.detail = { user, authorized, isAdmin }
+});
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `user` | `FirebaseUser \| null` | The current Firebase user object |
+| `authorized` | `boolean` | `true` when a username account is fully set up and allowed in |
+| `isAdmin` | `boolean` | `true` for the shared steward session |
+
+## Public API
+
+These window-level functions are part of the stable public surface used by other modules:
+
+```js
+// Opens the sign-in / account dialog
+window.__heroOpenAccountDialog();
+
+// Opens the same dialog from a blocked view (e.g. a feature gate)
+window.__heroShowAuthGate();
+
+// Map of { deviceId → { name, username, userId, deviceId } }
+// Populated for admin sessions only; used by the Banned Devices panel
+window.__heroDeviceProfiles;
+```
+
+## Account deletion
+
+Deleting an account permanently removes:
+- Quiz scores (`leaderboard`, `leaderboardTwoYear`)
+- Flappy Bird scores
+- Daily Challenge progress and streak
+- Feedback reports and attachments
+- Presence records and device profiles
+- The member document and stats document
+- Push notification tokens
+- The recovery record via `POST /api/account-recovery` with `{ action: "delete" }`
+
+The Firebase Auth user is then deleted. The deletion flow requires the user to type `DELETE` and re-enter their current password to confirm.
+
+<Warning>
+  Firebase may retain operational logs and backups beyond account deletion. Account deletion cannot guarantee immediate provider-side erasure.
+</Warning>
+
+## Deployment prerequisites
+
+Before enabling username accounts in production, complete all of the following:
+
+<Steps>
+  <Step title="Set EdgeOne environment variables">
+    | Variable | Purpose |
+    |----------|---------|
+    | `FIREBASE_API_KEY` | Same public API key as `js/02-firebase-config.js`; used server-side for ID token verification |
+    | `FIREBASE_PROJECT_ID` | Firebase project ID |
+    | `ACCOUNT_RECOVERY_PEPPER` | A 64-character hex secret (32 random bytes). Generate with: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` — never commit it |
+    | `FIREBASE_CLIENT_EMAIL` | Service account email |
+    | `FIREBASE_PRIVATE_KEY_1`…`N` | Private key split into chunks ≤ 450 characters |
+  </Step>
+  <Step title="Grant IAM roles">
+    The service account identified by `FIREBASE_CLIENT_EMAIL` needs:
+    - `firebaseauth.users.update` — to reset passwords via the Identity Toolkit API
+    - `roles/datastore.user` (Cloud Datastore User) — to read and write recovery records in Firestore
+  </Step>
+  <Step title="Enable Email/Password in Firebase Auth">
+    Go to **Firebase Console → Authentication → Sign-in method** and enable the **Email/Password** provider. Hero uses it internally for username aliases even though users never enter an email address.
+  </Step>
+  <Step title="Disable the Google provider">
+    Disable the **Google** sign-in provider in Firebase Authentication. The site does not offer Google sign-in or account migration.
+  </Step>
+  <Step title="Publish firestore.rules">
+    Paste `firestore.rules` into **Firebase Console → Firestore → Rules** and publish it. The updated rules are required for member document writes and for account deletion to succeed.
+  </Step>
+</Steps>
+
+<Tip>
+  The recovery service validates that `ACCOUNT_RECOVERY_PEPPER` is exactly 64 hex characters. The `config()` function in `account-recovery.js` returns `null` and all requests return `503 not_configured` if any required variable is missing or malformed — safe to test before secrets are set.
+</Tip>

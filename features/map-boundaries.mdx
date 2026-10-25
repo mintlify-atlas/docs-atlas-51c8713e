@@ -1,0 +1,165 @@
+---
+title: "Building and Customizing Hero's Map Boundary Bundles"
+sidebarTitle: "Map Boundaries"
+description: "How Hero loads GeoJSON outlines at quiz time, the build pipeline from Natural Earth and historical basemaps, override format, and CSS rendering classes."
+---
+
+Hero renders map outlines directly from a local GeoJSON bundle — `content/location-boundaries.geojson` — rather than fetching shapes from an external CDN at quiz time. This keeps the map fast and offline-capable once the page loads. The bundle is not committed with meaningful data: a fresh clone ships an empty starter file, and a steward must run the boundary build after exporting the quiz catalog to populate it.
+
+## Data sources
+
+<CardGroup cols={2}>
+  <Card title="Natural Earth v5.1.2" icon="globe">
+    1:10m scale shapes for countries, admin-1 provinces and states, lakes, marine areas, rivers, and geographic regions. Natural Earth data is public domain and is downloaded only during the build step; the generated bundle is what the site ships.
+  </Card>
+  <Card title="aourednik/historical-basemaps" icon="scroll">
+    Historical polygons for empires, kingdoms, and political boundaries at specific years. The build picks the closest available year in the project's index for each location with a `year` set. Selected source years are recorded in the bundle; non-exact matches are flagged for review.
+  </Card>
+</CardGroup>
+
+## Boundary kinds
+
+Each feature in the bundle carries a `kind` field that controls both the query logic and the CSS rendering class applied by Leaflet:
+
+| Kind | Description |
+|------|-------------|
+| `land` | Present-day country or admin-1 polygon from Natural Earth |
+| `empire` | Historical kingdom or empire polygon from historical-basemaps |
+| `route` | Trade route or path (typically from a manual GeoJSON override) |
+| `river` | River polyline from Natural Earth |
+| `lake` | Lake polygon from Natural Earth |
+| `water` | Ocean, sea, or other marine area |
+
+## The build pipeline
+
+<Steps>
+  <Step title="Export the boundary build catalog">
+    Sign in as a steward, open the quiz editor, and choose **Export boundary build catalog**. This downloads `location-catalog.json`, which contains the shared tour location lists but no account records.
+
+    For any location that represents a historical place, set a **Year** value in the per-location Year field before exporting. Negative values mean BCE (e.g. `-500` for 500 BCE).
+  </Step>
+  <Step title="Run the build command">
+    From the repository root, pass the path to the downloaded catalog:
+
+    ```bash
+    npm run build:boundaries -- "/path/to/location-catalog.json"
+    ```
+
+    On Windows:
+
+    ```bash
+    npm run build:boundaries -- "C:\\Users\\you\\Downloads\\location-catalog.json"
+    ```
+
+    The script fetches Natural Earth and historical-basemap data, matches each location to the best-fit feature, and writes the output to `content/location-boundaries.geojson`.
+  </Step>
+  <Step title="Review unmatched locations">
+    Open `content/location-boundaries-unmatched.json` to see which locations the build could not automatically match. Locations that matched only by containing province or country are included in the review report with a note.
+  </Step>
+  <Step title="Add overrides and rebuild">
+    Edit `content/location-boundary-overrides.json` to add aliases, corrected names, adjusted years, or direct GeoJSON file references. Then run the build command again.
+  </Step>
+</Steps>
+
+## Override format
+
+Overrides let you supply a direct GeoJSON file for features that are not in the source datasets — such as trade routes, custom regions, or manually traced shapes:
+
+```json
+[
+  {
+    "locationId": "silk-road-id",
+    "file": "manual/silk-road.geojson",
+    "featureIndex": 0,
+    "kind": "route",
+    "hintRegion": "Central Asia"
+  }
+]
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `locationId` | Yes | The location's unique ID from the quiz editor |
+| `file` | Yes | Path to a GeoJSON file relative to `content/` |
+| `featureIndex` | Yes | Zero-based index of the feature to use within the GeoJSON `FeatureCollection` |
+| `kind` | Yes | One of `land`, `empire`, `route`, `river`, `lake`, `water` |
+| `hintRegion` | No | A human-readable region string returned by `window.__heroRegionHint()` for this location |
+
+<Tip>
+  The `hintRegion` field on overrides is the only way to provide a region hint for features like trade routes that do not belong to a Natural Earth polygon. Without it, `window.__heroRegionHint()` returns an empty string for that location.
+</Tip>
+
+## Historical locations
+
+Set a numeric **Year** on any quiz location that corresponds to a historical boundary. The build uses the closest year available in the `aourednik/historical-basemaps` index:
+
+- Positive integers are CE years (e.g. `1200` for 1200 CE).
+- Negative integers are BCE years (e.g. `-500` for 500 BCE).
+- The selected source year is recorded in the bundle so reviewers can verify the match.
+- Non-exact year selections are flagged in the review report.
+
+<Warning>
+  Historical basemap boundaries are a work in progress. Always review the selected polygons in `content/location-boundaries-unmatched.json` before publishing a build that includes historical locations.
+</Warning>
+
+## Region hint API
+
+`window.__heroRegionHint(loc)` is an async function that loads the boundary bundle and returns a region hint string for a given location object. It is used by the quiz interface to show contextual clues without revealing the exact answer:
+
+```js
+const hint = await window.__heroRegionHint(loc);
+// e.g. "Central Asia" or "Sub-Saharan Africa"
+```
+
+The function loads `content/location-boundaries.geojson` on first call and caches it. The hint is derived from the `hintRegion` field on the matching feature, which is populated by Natural Earth's region classifications for `land` features or by the `hintRegion` override field for manual entries.
+
+## CSS rendering classes
+
+Leaflet applies the following CSS classes when a boundary is rendered on the map. You can override their styles in `css/styles.css` or `css/night.css`:
+
+| Class | Purpose |
+|-------|---------|
+| `hl-halo` | Outer glow layer rendered behind the main shape |
+| `hl-glow` | Inner glow layer for emphasis |
+| `hl-outline` | Crisp stroke drawn on top of the fill layers |
+| `hl hl-{kind}` | Combined base class plus kind modifier, e.g. `hl hl-empire` or `hl hl-route` |
+
+Each boundary is rendered as a Leaflet GeoJSON layer. The `kind` modifier lets you style historical empires, rivers, and routes differently from present-day land boundaries.
+
+## Map tile options
+
+The tile layer used beneath boundary overlays is configured in `js/12-map-highlight.js`. Three presets are available:
+
+<Accordion title="OpenStreetMap Standard">
+  The default tile layer. Street-level detail, open data license.
+
+  ```
+  https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
+  ```
+</Accordion>
+
+<Accordion title="OSM HOT">
+  Humanitarian OpenStreetMap Team style. Higher contrast, useful for regions with sparse labels.
+
+  ```
+  https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png
+  ```
+</Accordion>
+
+<Accordion title="Esri World Imagery (Satellite)">
+  Satellite imagery from Esri. Useful for physical geography quizzes.
+
+  ```
+  https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+  ```
+</Accordion>
+
+## Starter bundle note
+
+The `content/location-boundaries.geojson` file committed to the repository is an **empty starter bundle**. It is valid GeoJSON but contains no features. Run the boundary build after exporting the quiz catalog to populate it:
+
+```bash
+npm run build:boundaries -- "/path/to/location-catalog.json"
+```
+
+Until the build has run, the map will render without boundary overlays during quiz play. No error is thrown — the quiz is fully playable without boundaries; they are an enhancement layer only.

@@ -1,47 +1,173 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "How to Deploy a Hero Instance End-to-End on EdgeOne"
+sidebarTitle: "Quickstart"
+description: "Step-by-step guide to forking Hero, wiring up Firebase and EdgeOne, setting environment variables, and verifying a live deployment."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide walks you through every step required to go from zero to a running Hero instance. You will fork the repository, configure the site identity and Firebase credentials, set the required EdgeOne environment variables, and trigger your first deploy. The whole process takes roughly 20–30 minutes, most of which is spent in the Firebase Console and EdgeOne dashboard.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Fork and clone the repository
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Fork [`crwcln/heroapp`](https://github.com/crwcln/heroapp) on GitHub, then clone your fork locally.
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+```bash
+git clone https://github.com/<your-username>/heroapp.git
+cd heroapp
+```
+
+Install the development dependencies and set up the Git commit-message hook. The hook prefixes every VS Code / `git commit` subject line with `v<version>:` taken from `SITE.version` in `js/00-site-config.js`; any message you type is appended after the prefix.
+
+```bash
+npm install
+npm run setup:git-hooks
+```
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  Run `npm run setup:git-hooks` once per clone — including on any new machine or CI environment where you intend to make commits. The hook lives in `.git/hooks/` and is not tracked by Git itself.
 </Tip>
+
+### Configure site identity in `js/00-site-config.js`
+
+Open `js/00-site-config.js`. This is the single source of truth for the site name, data namespace, versioning, and feature flags. At minimum, change `id` and `name` before your first deploy. The `id` value namespaces all Firestore documents for this instance — two copies of Hero can share one Firebase project as long as they have different `id` values.
+
+```js title="js/00-site-config.js"
+const SITE = {
+  id: 'hero-2026',          // Unique namespace for Firestore paths — change this for every copy
+  name: 'Hero',             // Display name shown in the UI
+  version: '1.3.9.1',       // Updated automatically by npm run release:*
+  tagline: 'STUDYING, REDEFINED.',
+
+  // Public opening time (ISO 8601 UTC). Used by the launch countdown.
+  launchAt: '2026-10-21T23:00:00Z',
+
+  // Increment intro to replay the opening film for all users.
+  intro: 4,
+  introVideo: 'media/hero-trailer.mp4',
+
+  // Toggle features without removing source files.
+  features: {
+    clio: true,           // Gemini AI chat (requires GEMINI_API_KEY edge variable)
+    music: true,
+    tutorial: true,
+    cookies: true,
+    secrets: true,
+    flappyBird: true,
+    randomLocations: true,
+  },
+}
+
+// Exposed globally so Firestore paths throughout the app resolve the right namespace.
+window.__app_id = SITE.id;
+```
+
+<Warning>
+  `SITE.id` is also read by the account-recovery edge function via the `FIREBASE_SITE_ID` environment variable. If you change `id` after deploying, set `FIREBASE_SITE_ID` in EdgeOne to match the new value, or existing recovery records will be unreachable.
+</Warning>
+
+### Create and configure a Firebase project
+
+1. Open [Firebase Console](https://console.firebase.google.com/) and create a new project (or reuse an existing one).
+2. Under **Build → Firestore Database**, create a database. Choose the region closest to your users.
+3. Under **Build → Authentication → Sign-in method**, enable **Email/Password**. Hero implements usernames as non-deliverable `@accounts.hero.invalid` email aliases internally; this provider must remain enabled even though users never enter an email address.
+4. Under **Authentication → Settings → Authorized domains**, add your EdgeOne Pages deployment domain (e.g., `your-project.edgeone.app`).
+5. Navigate to **Firestore Database → Rules**, paste the full contents of `firestore.rules` from the repository, and click **Publish**.
+
+<Note>
+  The Firestore rules enforce that recovery hashes (`accountRecovery` collection) are only accessible through the trusted edge function — client-side reads and writes are explicitly denied with `allow read, write: if false`. Publish the rules before going live.
+</Note>
+
+### Set Firebase web app credentials in `js/02-firebase-config.js`
+
+In the Firebase Console, go to **Project settings → Your apps** and register a **Web app** if you haven't already. Copy the config snippet and paste the values into `js/02-firebase-config.js`:
+
+```js title="js/02-firebase-config.js"
+// Public Firebase web-app settings. These ship to browsers — do NOT put
+// a service-account private key or any server secret in this file.
+window.__firebase_config = JSON.stringify({
+  apiKey:            'YOUR_API_KEY',
+  authDomain:        'YOUR_PROJECT_ID.firebaseapp.com',
+  projectId:         'YOUR_PROJECT_ID',
+  storageBucket:     'YOUR_PROJECT_ID.firebasestorage.app',
+  messagingSenderId: 'YOUR_SENDER_ID',
+  appId:             '1:YOUR_SENDER_ID:web:YOUR_APP_ID',
+  measurementId:     'G-XXXXXXXXXX',   // optional
+});
+```
+
+Commit and push this file. It is intentionally public — Firebase enforces access through Firestore rules and Authentication settings, not by keeping the web config secret.
+
+### Set required EdgeOne environment variables
+
+In your EdgeOne Pages project, go to **Settings → Environment variables** and add the following. Never commit real values to the repository.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `ADMIN_PASSWORD` | **Yes** | Steward sign-in and signing server-side admin sessions |
+| `FIREBASE_CLIENT_EMAIL` | **Yes** | Firebase service-account email from the JSON key file |
+| `FIREBASE_PRIVATE_KEY_1` … `FIREBASE_PRIVATE_KEY_N` | **Yes** | Service-account private key split into chunks of ≤ 450 characters each. A single `FIREBASE_PRIVATE_KEY` variable is also supported. |
+| `FIREBASE_API_KEY` | **Yes** | The same `apiKey` value already in `js/02-firebase-config.js` — the edge function needs its own copy for server-side Firebase Auth verification |
+| `ACCOUNT_RECOVERY_PEPPER` | **Yes** | A private random value used to HMAC one-time account recovery codes |
+| `DEV_ACCESS` | Yes for early access / dev mode | Unlocks the launch countdown and Dev Mode controls |
+| `GEMINI_API_KEY` | Optional | Enables the Clio AI assistant |
+| `FIREBASE_WEB_PUSH_VAPID_KEY` | Optional | Enables Web Push notifications (public VAPID key from Firebase Console → Cloud Messaging) |
+| `DEPLOY_WEBHOOK_URL` | Optional | EdgeOne build webhook URL for the steward redeploy action |
+| `GITHUB_TOKEN` | Optional | GitHub token for the steward redeploy action (requires repository contents read/write) |
+| `CANVAS_ALLOWED_HOSTS` | Optional | Comma-separated hostnames for custom Canvas domains beyond `*.instructure.com` |
+
+To generate a secure `ACCOUNT_RECOVERY_PEPPER`, run this locally and paste the output directly into EdgeOne — do not save it in the repository:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+<Tip>
+  The Firebase service-account private key is typically one long string. Split it into sequential variables — `FIREBASE_PRIVATE_KEY_1`, `FIREBASE_PRIVATE_KEY_2`, etc. — with each chunk no longer than 450 characters. The edge function reassembles them in numeric order.
+</Tip>
+
+### Connect the GitHub repository to EdgeOne Pages and deploy
+
+1. In the EdgeOne console, create a new **Pages** project and select **Connect to GitHub**.
+2. Authorise EdgeOne to access your fork and select the correct repository and branch (default: `main`).
+3. EdgeOne reads `edgeone.json` from the repository root and runs `npm run build` as the build command before deploying. The build stamps every local JS and CSS URL with a content hash, giving each deployment a unique build ID.
+4. Trigger the first deployment. Check the **Build & Deploy** log and confirm it includes `Stamped ... local assets` near the end.
+
+<Note>
+  `edgeone.json` also configures caching headers: `index.html` and `firebase-messaging-sw.js` are served `no-cache, no-store, must-revalidate`; all `/js/*` and `/css/*` files are served with a one-year immutable cache. This is required because the build uses content-hash query strings (`?v=...`) on every asset reference.
+</Note>
+
+### Verify the deployment
+
+1. Open your deployed EdgeOne Pages URL in a browser. The Hero intro sequence should play.
+2. Navigate to **Settings** (or the relevant tab) and click **Sign in as Steward**. Enter the value you set for `ADMIN_PASSWORD`.
+3. Once signed in, confirm the **Admin** tab is visible. Open the **Dev Mode** card to verify the steward session is active.
+4. To confirm account recovery is working, create a test username account, copy the one-time recovery code, then use it to reset the password from the sign-in screen.
+
+<Warning>
+  If the admin panel does not appear after signing in, double-check that `FIREBASE_CLIENT_EMAIL` and `FIREBASE_PRIVATE_KEY_1…N` are set correctly and belong to the same Firebase project as the values in `js/02-firebase-config.js`. Mismatched project credentials are the most common cause of failed steward authentication.
+</Warning>
+
+</Steps>
+
+## After your first deploy
+
+Once the site is live, use these commands to manage versions and styles:
+
+<CodeGroup>
+```bash Version bumps
+npm run release:patch   # 1.2.7 → 1.2.8
+npm run release:minor   # 1.2.7 → 1.3.0
+npm run release:major   # 1.2.7 → 2.0.0
+```
+```bash CSS rebuild
+# Rebuild css/tailwind.css after changing tailwind.input.css or tailwind.config.js
+npm run build:css
+```
+```bash Boundary rebuild
+# After exporting a new location catalog from the admin panel
+npm run build:boundaries -- "/path/to/location-catalog.json"
+```
+</CodeGroup>
+
+Each `release:*` script updates `SITE.version` in `js/00-site-config.js`, the `package.json` version field, and rebuilds `css/tailwind.css`. Push the resulting commit to trigger a new EdgeOne deploy.

@@ -1,0 +1,132 @@
+---
+title: "Create an Empty Git Commit and Trigger an EdgeOne Redeploy"
+sidebarTitle: "POST /api/deploy"
+description: "Pushes an empty commit with a custom message to GitHub and fires the EdgeOne deploy webhook, forcing a fresh build without changing any site files."
+---
+
+`POST /api/deploy` is the Steward redeploy action. It creates a new Git commit that carries the same file tree as the current branch HEAD — no content changes — advances the branch reference, and then calls the EdgeOne deploy webhook to trigger a fresh build. This is useful for forcing a redeployment when environment variables have changed or to timestamp a deployment with a descriptive message.
+
+The endpoint requires an admin HMAC token obtained from `POST /api/auth`. The token is passed in the request body alongside the commit message. The `GITHUB_TOKEN` and `DEPLOY_WEBHOOK_URL` values are server-side secrets and are never exposed to the browser.
+
+<Warning>
+  A successful `200` response means the webhook accepted the build request. It does not guarantee the build completed successfully. Check the EdgeOne **Build & Deploy** log for the final result.
+</Warning>
+
+## Request
+
+**Method:** `POST`  
+**Path:** `/api/deploy`  
+**Content-Type:** `application/json`  
+**Authentication:** Admin HMAC token in the request body
+
+### Body parameters
+
+<ParamField body="token" type="string" required>
+  A valid admin token obtained from `POST /api/auth` with `target: "admin"`. The token format is `<expiry_ms>.<sha256-hmac>` and is valid for 30 minutes from issuance. Expired or malformed tokens are rejected with `unauthorized`.
+</ParamField>
+
+<ParamField body="message" type="string" required>
+  The Git commit message. Must be between 1 and 120 characters (after trimming whitespace). Newline characters (`\r`, `\n`) are not allowed. The message appears verbatim in the repository commit history.
+</ParamField>
+
+## Response
+
+### 200 — Success
+
+```json
+{
+  "ok": true,
+  "commitSha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+  "commitMessage": "Redeploy: update announcements",
+  "branch": "main"
+}
+```
+
+<ResponseField name="ok" type="boolean">
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="commitSha" type="string">
+  The full SHA of the newly created commit.
+</ResponseField>
+
+<ResponseField name="commitMessage" type="string">
+  The commit message as stored in Git (the trimmed value of the `message` field you sent).
+</ResponseField>
+
+<ResponseField name="branch" type="string">
+  The branch that was advanced. Matches the `DEPLOY_BRANCH` environment variable or `"main"` if not set.
+</ResponseField>
+
+## Error codes
+
+| Code | HTTP | Cause |
+|------|------|-------|
+| `not_configured` | 500 | One or more required environment variables are missing; includes a `missing` array listing the absent variable names |
+| `invalid_deploy_config` | 500 | `GITHUB_REPOSITORY` is not in `owner/name` format or `DEPLOY_BRANCH` contains characters outside `[A-Za-z0-9_.-]` |
+| `bad_request` | 400 | Request body could not be parsed as JSON |
+| `unauthorized` | 401 | Token is missing, expired, or HMAC verification failed |
+| `invalid_message` | 400 | `message` is empty, exceeds 120 characters, or contains newline characters |
+| `github_failed` | 502 | A GitHub API call failed (includes `status` field with the HTTP status from GitHub) |
+| `hook_failed` | 502 | The commit was created and pushed but the deploy webhook returned a non-2xx status; includes `status`, `commitSha`, and `commitCreated: true` |
+| `hook_unreachable` | 502 | The commit was created and pushed but the webhook could not be reached; includes `commitCreated: true` and `commitSha` |
+
+<Note>
+  When `hook_failed` or `hook_unreachable` is returned, the Git commit has already been pushed to the repository (`commitCreated: true`). You can manually trigger a redeployment from the EdgeOne dashboard without re-calling this endpoint.
+</Note>
+
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ADMIN_PASSWORD` | Yes | Used to verify the admin token HMAC |
+| `DEPLOY_WEBHOOK_URL` | Yes | EdgeOne build/deploy webhook URL |
+| `GITHUB_TOKEN` | Yes | GitHub personal access token or fine-grained token with repository contents read and write permissions |
+| `GITHUB_REPOSITORY` | Yes | Repository identifier in `owner/name` format (e.g., `crwcln/heroapp`) |
+| `DEPLOY_BRANCH` | No | Branch to commit to; defaults to `main` |
+
+## GitHub operations
+
+The endpoint makes three sequential GitHub API calls:
+
+1. `GET /repos/{owner}/{repo}/git/ref/heads/{branch}` — resolves the current branch HEAD SHA.
+2. `GET /repos/{owner}/{repo}/git/commits/{sha}` — fetches the HEAD commit to obtain its tree SHA.
+3. `POST /repos/{owner}/{repo}/git/commits` — creates a new commit with the same tree SHA and the branch HEAD as its parent.
+4. `PATCH /repos/{owner}/{repo}/git/refs/heads/{branch}` — fast-forwards the branch to the new commit (non-force push).
+
+After the branch ref is updated, the endpoint `POST`s to `DEPLOY_WEBHOOK_URL` with no body.
+
+## Examples
+
+### Step 1 — Obtain an admin token
+
+```bash
+TOKEN=$(curl -s -X POST https://example.com/api/auth \
+  -H "Content-Type: application/json" \
+  -d '{"target": "admin", "password": "your-admin-password"}' \
+  | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+
+echo "Token: $TOKEN"
+```
+
+### Step 2 — Trigger a redeploy
+
+```bash
+curl -s -X POST https://example.com/api/deploy \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"token\": \"$TOKEN\",
+    \"message\": \"Redeploy: publish new quiz content\"
+  }"
+```
+
+**Successful response:**
+
+```json
+{
+  "ok": true,
+  "commitSha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+  "commitMessage": "Redeploy: publish new quiz content",
+  "branch": "main"
+}
+```

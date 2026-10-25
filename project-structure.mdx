@@ -1,0 +1,203 @@
+---
+title: "Hero Repository Layout, Files, and Their Responsibilities"
+sidebarTitle: "Project Structure"
+description: "A map of every directory and file in the Hero repository — what each one does, how the numbered JS convention works, and where secrets must never appear."
+---
+
+Hero's repository is a flat static site with a small number of well-defined directories. There is no framework build step beyond Tailwind CSS and the content-hash stamping script — what you see in the repository is (after `npm run build` runs) what EdgeOne deploys. The sections below walk through each directory and the role of every significant file.
+
+## Top-level layout
+
+| Path | Contents |
+| --- | --- |
+| `index.html` | Site markup and script loading order |
+| `js/` | Browser code, split by feature using a numbered convention |
+| `css/` | Site styles and the generated Tailwind CSS output |
+| `edge-functions/api/` | EdgeOne serverless endpoints; private keys are read from environment variables |
+| `scripts/` | Versioning and maintenance scripts run from `npm run *` |
+| `firestore.rules` | Firestore security rules — must be published to the active Firebase project |
+| `content/` | Pre-built map boundary data and the boundary build documentation |
+| `edgeone.json` | EdgeOne Pages configuration: build command and HTTP response headers |
+| `tailwind.config.js` | Tailwind CSS configuration |
+| `tailwind.input.css` | Tailwind source file — edit this, then run `npm run build:css` |
+| `package.json` | npm scripts and dependencies (`firebase-admin`, `tailwindcss`) |
+
+## `index.html`
+
+`index.html` is the single HTML entry point for the entire application. It contains all page markup — navigation, tab panels, dialog shells, and canvas elements — and defines the exact order in which the numbered JavaScript files are loaded via `<script>` tags. Changing the load order, or adding a new script tag, should be done here.
+
+EdgeOne serves `index.html` (and `/`) with `Cache-Control: no-cache, no-store, must-revalidate` so that browsers always fetch the latest build on navigation. Navigation labels, tab identifiers, and structural layout changes are made here rather than in JavaScript.
+
+## `js/` — numbered browser features
+
+Every browser-side JavaScript file lives in `js/` and follows a two-digit numeric prefix convention:
+
+- **`00`** files are configuration and shared setup. They must load first because later files depend on the values they expose.
+- **Higher numbers** indicate later initialization order. A file with a higher number can safely read globals set by lower-numbered files.
+- Feature flags in `SITE.features` (set in `00-site-config.js`) allow individual features to be disabled without removing their source file.
+
+After `npm run build`, every `<script src="/js/NN-feature.js">` reference in `index.html` gains a `?v=<contenthash>` query string. These stamped URLs are served with `Cache-Control: public, max-age=31536000, immutable`, so browsers cache each version permanently and only fetch a new copy when the content hash changes.
+
+### Full file list
+
+```text title="js/ — all browser feature files"
+00-quotes.js              # Historical quotes shown on the loading screen
+00-site-config.js         # SITE object: id, name, version, feature flags
+02-firebase-config.js     # Firebase web app config (public; ships to browsers)
+03-year-mode.js           # 1-Year / 2-Year quiz mode selection
+04-app-core.js            # Firebase initialisation, auth state, global utilities
+05-auth-changelog-devmode-deploy.js  # Sign-in flow, changelog panel, Dev Mode, redeploy
+06-feedback-form.js       # In-app bug report and feedback submission
+07-dialogs-animations-inbox.js       # Dialog management, transitions, steward inbox
+08-settings-cookies.js    # Settings panel, cookie preferences, loading facts
+09-analytics-admin-tabs.js           # Usage analytics display and admin tab routing
+10-clio-ai-logout-parallax.js        # Clio AI chat interface, sign-out, parallax effects
+11-game-modes-music-tutorial.js      # Quiz game loop, background music, tutorial overlay
+12-map-highlight.js       # Map boundary rendering and location highlight logic
+13-intro.js               # Intro film scenes and pre-game loading sequence
+14-secret.js              # Hidden Lost Legends secret locations
+15-device-bans.js         # Device-ban check and enforcement on load
+16-flappy-bird.js         # Flappy Bird mini-game (configurable via EdgeOne variables)
+17-features.js            # Runtime feature-flag enforcement
+18-bulk-select.js         # Bulk selection UI in the admin panel
+19-announcements.js       # Announcement display and dismissal
+20-user-identity.js       # Username account creation, sign-in, recovery code flow
+21-runtime-bugs.js        # Uncaught exception and unhandled rejection capture to Firestore
+22-manoj-cursor.js        # Custom cursor effect
+23-daily-challenge.js     # Daily Challenge mode, shared leaderboard, streak tracking
+24-push-notifications.js  # Web Push opt-in, FCM token registration
+25-canvas-dashboard.js    # Canvas LMS integration and same-origin relay
+26-update-check.js        # 30-second poll for new build ID; prompts users to reload
+```
+
+<Note>
+  There is no `01-*.js` file — the gap between `00` and `02` is intentional. `00` files are static configuration; `02` begins the runtime-initialisation sequence. Do not rely on alphabetical ordering alone; the numeric prefix is the canonical load order.
+</Note>
+
+## `css/`
+
+<CardGroup cols={2}>
+  <Card title="tailwind.css" icon="palette">
+    Generated output. Never edit this file directly — it is overwritten by `npm run build:css`. Commit the generated file so EdgeOne can serve it without running a separate CSS build step.
+  </Card>
+  <Card title="night.css" icon="moon">
+    Hand-authored dark-theme variables and overrides. Edit this file to change colours, fonts, or the visual theme of the site.
+  </Card>
+  <Card title="styles.css" icon="pen-ruler">
+    General hand-authored site styles that are not Tailwind utilities.
+  </Card>
+  <Card title="tailwind.input.css" icon="file-code">
+    Source file fed to the Tailwind CLI. Add `@apply` rules or custom layers here, then run `npm run build:css` to regenerate `css/tailwind.css`.
+  </Card>
+</CardGroup>
+
+## `edge-functions/api/`
+
+These are EdgeOne serverless functions. They run in a trusted environment where `context.env` provides access to secrets stored as EdgeOne environment variables. Browser code must never receive service-account private keys, `ADMIN_PASSWORD`, or `ACCOUNT_RECOVERY_PEPPER`.
+
+| File | Endpoint | Purpose |
+| --- | --- | --- |
+| `auth.js` | `POST /api/auth` | Verifies `ADMIN_PASSWORD` and issues a signed admin session token |
+| `account-recovery.js` | `POST /api/account-recovery` | Validates a one-time recovery code (HMAC'd with `ACCOUNT_RECOVERY_PEPPER`) and resets the account password |
+| `chat.js` | `POST /api/chat` | Verifies the caller's Firebase ID token, then proxies a request to the Gemini API using `GEMINI_API_KEY` |
+| `canvas.js` | `GET /api/canvas` | Same-origin relay for Canvas LMS API requests; enforces `CANVAS_ALLOWED_HOSTS` allowlist |
+| `config.js` | `GET /api/config` | Returns public runtime configuration values to the browser (e.g., VAPID key) |
+| `deploy.js` | `POST /api/deploy` | Creates an empty Git commit via `GITHUB_TOKEN` and triggers the `DEPLOY_WEBHOOK_URL` redeploy |
+| `firebase-token.js` | `POST /api/firebase-token` | Exchanges credentials for a Firebase custom token using the service-account key |
+| `push-announcement.js` | `POST /api/push-announcement` | Sends a Web Push notification to opted-in FCM tokens using Firebase Cloud Messaging HTTP v1 |
+| `push-config.js` | `GET /api/push-config` | Returns the public VAPID key for Web Push registration |
+
+## `scripts/`
+
+Maintenance and build scripts invoked through `npm run *`. These run only in Node.js (locally or in the EdgeOne build environment) — they are never loaded in the browser.
+
+<CardGroup cols={2}>
+  <Card title="cache-bust-assets.mjs" icon="fingerprint">
+    The production build script (`npm run build`). Scans `index.html` for local JS and CSS references, computes a content hash for each file, and rewrites the `src`/`href` attributes to include `?v=<hash>`. Also writes a unique build ID into the HTML so `26-update-check.js` can detect new deployments.
+  </Card>
+  <Card title="bump-version.js" icon="arrow-up">
+    Called by `npm run release:patch|minor|major`. Increments `SITE.version` in `js/00-site-config.js` and the `version` field in `package.json` together, keeping them in sync.
+  </Card>
+  <Card title="build-boundaries.mjs" icon="draw-polygon">
+    Called by `npm run build:boundaries -- "/path/to/catalog.json"`. Downloads Natural Earth and historical basemap data, matches quiz locations by name and year, writes `content/location-boundaries.geojson`, and outputs `content/location-boundaries-unmatched.json` for review.
+  </Card>
+  <Card title="setup-git-hooks.js" icon="code-branch">
+    Called by `npm run setup:git-hooks` once per clone. Installs a `prepare-commit-msg` hook in `.git/hooks/` that prepends `v<version>:` (from `SITE.version`) to every commit subject.
+  </Card>
+</CardGroup>
+
+The `scripts/git-hooks/` subdirectory contains the hook template file that `setup-git-hooks.js` installs.
+
+## `firestore.rules`
+
+This file defines every read and write permission for the Cloud Firestore database. It must be pasted into the **Firebase Console → Firestore Database → Rules** editor and published before the site goes live. Key design decisions enforced by the rules:
+
+- **`isAdmin()`** — only tokens with `admin: true` in their custom claims (issued by `/api/auth`) can write quiz settings, read analytics, manage bans, or delete other users' records.
+- **`signedIn()`** — shared app features (leaderboards, daily challenges, feedback) require a non-anonymous Firebase account. Anonymous sessions are local-only.
+- **`ownsUsername()`** — member profile and device profile writes are validated against the `@accounts.hero.invalid` email pattern, preventing one account from writing another account's username.
+- **`accountRecovery`** — the entire collection is `allow read, write: if false` for clients. Only the trusted `account-recovery.js` edge function (using the Firebase Admin SDK) can touch these documents.
+
+```text title="firestore.rules — top-level collections under /artifacts/{appId}/public/data/"
+globalSettings/        # Quiz config, changelog, dev mode, stats
+leaderboard/           # 1-Year leaderboard entries
+leaderboardTwoYear/    # 2-Year leaderboard entries
+dailyChallenges/       # Per-day shared scores
+dailyChallengeProgress/ # Per-account streak records (private)
+memberStats/           # Per-account weak-spot tracking (private)
+presence/              # Anonymous usage presence records
+members/               # Account profiles and push tokens (private)
+deviceProfiles/        # Device-to-account name mappings
+accountRecovery/       # Recovery HMACs — client access denied entirely
+runtimeBugs/           # Uncaught JS exceptions reported by 21-runtime-bugs.js
+analytics/             # Daily aggregated usage counters
+bans/                  # Device ban records
+flappy/                # Flappy Bird leaderboard
+announcements/         # Admin-posted announcements
+feedback/              # User-submitted bug reports and feedback
+```
+
+## `content/`
+
+| File | Purpose |
+| --- | --- |
+| `location-boundaries.geojson` | Pre-built map boundary bundle shipped with the static site. Generated by `npm run build:boundaries`. The starter file is an empty bundle until the first build runs. |
+| `location-boundary-overrides.json` | Manual override entries: maps a `locationId` to a custom GeoJSON file, feature index, kind, and hint region. Used for features like trade routes that are not in Natural Earth or historical basemap datasets. |
+| `BOUNDARIES.md` | Step-by-step instructions for exporting the quiz catalog from the admin panel and running `build:boundaries` to regenerate the boundary bundle. |
+
+## `edgeone.json`
+
+`edgeone.json` is read by EdgeOne Pages at deploy time. It sets the build command and configures HTTP response headers for specific path patterns:
+
+```json title="edgeone.json"
+{
+  "buildCommand": "npm run build",
+  "headers": [
+    {
+      "source": "/",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    },
+    {
+      "source": "/index.html",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    },
+    {
+      "source": "/firebase-messaging-sw.js",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    },
+    {
+      "source": "/js/*",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+    },
+    {
+      "source": "/css/*",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+    }
+  ]
+}
+```
+
+The HTML entry point and the service worker are served `no-store` so every page load picks up the latest content hash references. All JS and CSS files are served with a one-year immutable cache — safe because the build stamps new hashes whenever file contents change.
+
+<Warning>
+  After publishing a change that modifies JS or CSS, verify the EdgeOne deployment log includes `Stamped ... local assets` and confirm that `/js/00-site-config.js` has a `?v=` query string in the deployed HTML source. If the stamp step did not run, browsers will continue serving stale cached files despite the new deploy.
+</Warning>

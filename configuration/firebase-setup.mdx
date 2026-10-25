@@ -1,0 +1,133 @@
+---
+title: "Set Up the Firebase Project for Your Hero Deployment"
+sidebarTitle: "Firebase Setup"
+description: "Step-by-step guide to creating the Firebase project, configuring authentication, publishing Firestore rules, and wiring the web app config into Hero."
+---
+
+Hero uses Firebase for two distinct purposes: Firestore is the real-time database that stores leaderboards, member profiles, quiz analytics, and push tokens; Firebase Authentication manages user identity using a username-and-password scheme. Before you deploy Hero, the Firebase project must be created, Firestore and Authentication must be enabled, your domain must be authorized, and the Firestore security rules must be published. This guide walks through each step in order.
+
+## Create the Firebase project
+
+<Steps>
+  <Step title="Open Firebase Console">
+    Go to [console.firebase.google.com](https://console.firebase.google.com) and sign in with a Google account that will own the project. Click **Add project**, enter a project name, and complete the creation wizard. You do not need Google Analytics for Hero's core functionality.
+  </Step>
+
+  <Step title="Enable Firestore in production mode">
+    In the left navigation, click **Build → Firestore Database**, then click **Create database**. When prompted for a start mode, select **Start in production mode** — Hero's `firestore.rules` file will govern all access from the moment it is published. Choose the Cloud Firestore location closest to your users, then click **Enable**.
+
+    <Warning>
+      Do not choose Native mode with a test-mode ruleset and plan to tighten it later. Deploying Hero with overly permissive rules, even briefly, exposes leaderboard and profile data to unauthenticated writes.
+    </Warning>
+  </Step>
+
+  <Step title="Enable Email/Password authentication">
+    In the left navigation, click **Build → Authentication**, then click **Get started**. On the **Sign-in method** tab, click **Email/Password** under Native providers and enable it.
+
+    <Note>
+      Hero never asks users for an email address. The Email/Password provider is used internally because Hero implements usernames as Firebase Auth aliases in the reserved, non-deliverable `@accounts.hero.invalid` domain. Users sign in with a 3–20 character username and password; the underlying Firebase email address is never shown or required.
+    </Note>
+  </Step>
+
+  <Step title="Disable the Google provider">
+    On the same **Sign-in method** tab, find **Google** under Additional providers. If it is enabled, click it and disable it. Hero no longer offers Google sign-in or legacy account migration. Leaving this provider enabled serves no purpose and widens the authentication surface.
+  </Step>
+
+  <Step title="Add your deployed domain to authorized domains">
+    Still on the **Authentication → Sign-in method** tab, scroll to **Authorized domains**. Click **Add domain** and enter the hostname where Hero is deployed (for example, `hero.example.com`). Firebase rejects sign-in requests from origins that are not listed here, so this step is required before users can create accounts on your production URL.
+  </Step>
+
+  <Step title="Register a web app and copy the config">
+    In **Project settings** (the gear icon), click **Your apps → Add app → Web**. Give the app a nickname and click **Register app**. Firebase displays the web app configuration object. Copy the values into `js/02-firebase-config.js`:
+
+    ```js
+    // Public Firebase web-app settings. These are expected to ship to browsers.
+    // Never put a Firebase service-account private key or other server secret in this file.
+    // When switching projects, replace every value from that project's Firebase web app.
+    window.__firebase_config = JSON.stringify({
+      apiKey: 'YOUR_API_KEY',
+      authDomain: 'YOUR_PROJECT_ID.firebaseapp.com',
+      projectId: 'YOUR_PROJECT_ID',
+      storageBucket: 'YOUR_PROJECT_ID.firebasestorage.app',
+      messagingSenderId: 'YOUR_SENDER_ID',
+      appId: '1:YOUR_SENDER_ID:web:YOUR_APP_ID',
+      measurementId: 'G-XXXXXXXXXX',
+    });
+    ```
+
+    <Note>
+      The Firebase web app config is **public browser configuration**, not a service-account credential. It is safe to commit this file to the repository and ship it to browsers. The actual security boundary is Firestore rules and Firebase Authentication — not the API key.
+    </Note>
+  </Step>
+
+  <Step title="Publish the Firestore security rules">
+    In the Firebase Console, navigate to **Firestore Database → Rules**. Delete the default content and paste the entire contents of `firestore.rules` from the repository root. Click **Publish**.
+
+    The rules enforce that:
+    - All shared data requires a signed-in (non-anonymous) account.
+    - Leaderboard entries may only be created by their owner, with validated score and name fields.
+    - Member profiles, daily challenge progress, and weak-spot stats are private to their owner.
+    - Account recovery hashes are inaccessible from client code (`allow read, write: if false`) — only the trusted edge function can manage them.
+    - Admin-only operations require a verified `admin: true` custom claim on the Firebase ID token.
+
+    Publish updated rules whenever you pull changes from the repository that modify `firestore.rules`.
+  </Step>
+</Steps>
+
+## Create a service account for server-side operations
+
+Several Hero features — account recovery, push notifications, and admin sign-in — require the EdgeOne edge functions to call Firebase APIs with elevated privileges. These calls use a Firebase service account key, which you store as EdgeOne environment variables rather than in the repository.
+
+<Steps>
+  <Step title="Generate a service account key">
+    In **Project settings → Service accounts**, click **Generate new private key**. Firebase downloads a JSON file containing the service account credentials. Keep this file secure; you will copy values from it into EdgeOne secrets and then delete the local copy.
+  </Step>
+
+  <Step title="Split the private key into chunks">
+    The JSON file contains a `private_key` field whose value is a PEM-encoded RSA private key — typically over 1 600 characters long. EdgeOne environment variable values have a maximum length, so you must split this value into chunks of **450 characters or fewer** and set them as numbered variables:
+
+    - `FIREBASE_PRIVATE_KEY_1` — first 450 characters of the key
+    - `FIREBASE_PRIVATE_KEY_2` — next 450 characters
+    - `FIREBASE_PRIVATE_KEY_3` — and so on until the key is fully covered
+
+    The edge functions reassemble the chunks at runtime. Include the full value verbatim, including the `-----BEGIN PRIVATE KEY-----` header, the `-----END PRIVATE KEY-----` footer, and all embedded `\n` escape sequences exactly as they appear in the JSON file.
+
+    <Warning>
+      Never commit the service account JSON file, any chunk of the private key, or any other value from the JSON file to the repository or to browser-facing source files. These are server secrets.
+    </Warning>
+  </Step>
+
+  <Step title="Set the remaining service account variables">
+    From the JSON file, also set:
+    - `FIREBASE_CLIENT_EMAIL` — the `client_email` field (for example, `firebase-adminsdk-xxxxx@your-project.iam.gserviceaccount.com`)
+    - `FIREBASE_PROJECT_ID` — the `project_id` field, if it cannot be derived from the client email
+  </Step>
+</Steps>
+
+## Grant IAM roles to the service account
+
+After creating the service account key, open [Google Cloud Console](https://console.cloud.google.com) for the same project (it shares a Google Cloud project with your Firebase project). Navigate to **IAM & Admin → IAM → Grant access** and add the service account email with the following roles:
+
+<CardGroup cols={1}>
+  <Card title="Cloud Datastore User — roles/datastore.user" icon="database">
+    Required for account recovery. Grants Firestore read and write access so the recovery edge function can create, read, and delete recovery records in the `accountRecovery` collection. A read-only role is not sufficient for this operation.
+  </Card>
+  <Card title="Firebase Cloud Messaging API Admin — roles/firebasecloudmessaging.admin" icon="bell">
+    Required for push notifications. Grants the `cloudmessaging.messages.create` permission so the announcement edge function can send Web Push messages to opted-in browsers via Firebase Cloud Messaging HTTP v1. Do not grant project Owner as a substitute.
+  </Card>
+  <Card title="Cloud Datastore Viewer — roles/datastore.viewer" icon="eye">
+    Required for push token lookup. The announcement sender queries Firestore to enumerate opted-in push tokens before dispatching notifications. Expired-token cleanup is best-effort with this read-only role.
+  </Card>
+</CardGroup>
+
+<Note>
+  The `roles/datastore.user` role covers Firestore read/write for account recovery, and `roles/datastore.viewer` is added separately for the push token lookup path. In practice, `roles/datastore.user` is a superset of `roles/datastore.viewer`, so if you are granting both, `roles/datastore.user` alone is sufficient for a deployment that uses both account recovery and push notifications.
+</Note>
+
+Also ensure that the **Firebase Cloud Messaging API** is enabled in **Google Cloud Console → APIs & Services → Enabled APIs & services** for the project.
+
+## Enable Web Push (optional)
+
+If you intend to use the push notification feature, one additional value is needed from the Firebase Console.
+
+Navigate to **Project settings → Cloud Messaging → Web Push certificates**. If no certificate exists, click **Generate key pair**. Copy the **Key pair** value (the public VAPID key) and set it as the `FIREBASE_WEB_PUSH_VAPID_KEY` EdgeOne environment variable. This is a public key and does not need to be treated as a secret, but it must match the project and the private key Firebase holds internally.

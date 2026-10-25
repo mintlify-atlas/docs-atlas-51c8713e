@@ -1,0 +1,252 @@
+---
+title: "Send Messages to Clio, the Hero AI Study Guide"
+sidebarTitle: "POST /api/chat"
+description: "Talk to Clio, Hero's Gemini-powered history and geography study guide; supports text, image uploads, streaming SSE, and Canvas LMS context injection."
+---
+
+`/api/chat` exposes Clio, Hero's AI study guide named for the Greek muse of history and inspired by Herodotus. Clio answers questions about locations, regions, rivers, empires, trade routes, and related geography and history topics. When a student provides Canvas LMS context, Clio can also help interpret grades, assignments, and announcements without claiming the ability to modify anything in Canvas.
+
+The endpoint has two methods. `GET /api/chat` is an unauthenticated config probe that reports whether the AI is configured. `POST /api/chat` requires a signed-in Hero account — the caller's Firebase ID token is verified server-side before any Gemini API call is made, keeping AI quota limited to authenticated users.
+
+---
+
+## GET /api/chat — Config check
+
+Returns the current AI configuration without exposing any secrets or requiring credentials. Use this to check whether `GEMINI_API_KEY` is set before showing the chat UI.
+
+**Method:** `GET`  
+**Path:** `/api/chat`  
+**Authentication:** None
+
+### Response
+
+```json
+{
+  "ok": true,
+  "GEMINI_API_KEY": true,
+  "models": [
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-flash-latest",
+    "gemini-3.5-flash"
+  ]
+}
+```
+
+<ResponseField name="ok" type="boolean">
+  Always `true`.
+</ResponseField>
+
+<ResponseField name="GEMINI_API_KEY" type="boolean">
+  `true` if the `GEMINI_API_KEY` environment variable is set, `false` otherwise. The key value is never returned.
+</ResponseField>
+
+<ResponseField name="models" type="string[]">
+  The ordered list of Gemini models the endpoint will try, starting with the fastest. The list begins with the value of `GEMINI_MODEL` (if set), followed by the built-in fallback sequence. Duplicates are removed.
+</ResponseField>
+
+### Example
+
+```bash
+curl -s https://example.com/api/chat
+```
+
+---
+
+## POST /api/chat — Send a message
+
+Sends a conversation to Clio and returns a reply, either as a single JSON object or as a Server-Sent Events stream.
+
+**Method:** `POST`  
+**Path:** `/api/chat`  
+**Content-Type:** `application/json`  
+**Authentication:** `Authorization: Bearer <firebase-id-token>`
+
+### Request parameters
+
+<ParamField header="Authorization" type="string" required>
+  A valid Firebase ID token in the form `Bearer <token>`. The token is verified server-side against Firebase Authentication using `FIREBASE_API_KEY`. Anonymous Firebase sessions are rejected; the caller must have an email or linked provider on their account.
+</ParamField>
+
+<ParamField body="messages" type="array" required>
+  The conversation history. Only the last 10 messages are used; earlier messages are silently discarded.
+
+  <Expandable title="Message object">
+    <ParamField body="role" type="string" required>
+      `"user"` or `"model"`. Messages with any other role are treated as `"user"`.
+    </ParamField>
+    <ParamField body="text" type="string">
+      The text content of the message. Maximum 1000 characters (the server truncates silently at that limit). Either `text` or `images` must be present; messages with neither are dropped.
+    </ParamField>
+    <ParamField body="images" type="array">
+      Up to 2 images per message. Each image is an object with `mimeType` and `data`.
+
+      <Expandable title="Image object">
+        <ParamField body="mimeType" type="string" required>
+          MIME type of the image. Accepted values: `"image/jpeg"`, `"image/png"`, `"image/webp"`.
+        </ParamField>
+        <ParamField body="data" type="string" required>
+          Base64-encoded image data. Maximum 1,600,000 characters. Must match the pattern `[A-Za-z0-9+/]+=*` (standard base64; no data-URL prefix).
+        </ParamField>
+      </Expandable>
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="ctx" type="string">
+  Optional site context string injected into Clio's system prompt. Intended for Canvas LMS summaries. Maximum 3000 characters (truncated silently). Clio treats this as private, potentially stale user-provided context and will never claim to modify Canvas data.
+</ParamField>
+
+<ParamField body="stream" type="boolean">
+  If `true`, the response is a `text/event-stream` SSE stream. If absent or `false`, the response is a standard JSON object.
+</ParamField>
+
+### Non-streaming response
+
+**HTTP 200 — Success**
+
+```json
+{ "ok": true, "reply": "Ancient Rome was located on the banks of the Tiber River..." }
+```
+
+<ResponseField name="ok" type="boolean">
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="reply" type="string">
+  Clio's reply. HTML formatting tags (`<strong>`, `<em>`, `<u>`, `<del>`, `<code>`, `<span>`) may be present. Markdown bold, italics, underline, and strikethrough are also supported.
+</ResponseField>
+
+**HTTP 4xx/5xx — Error**
+
+```json
+{ "ok": false, "error": "rate_limited" }
+```
+
+### Streaming response (`stream: true`)
+
+When `stream` is `true`, the response is `Content-Type: text/event-stream`. Each SSE event carries a JSON payload on the `data:` line.
+
+**Text delta event** — emitted once per text chunk as Gemini streams its response:
+
+```
+data: {"t":"Ancient Rome was located"}
+
+data: {"t":" on the banks of the Tiber River..."}
+```
+
+**Completion event** — sent after all text deltas:
+
+```
+data: {"done":true}
+```
+
+**Stream error event** — sent in place of text deltas when an upstream error occurs:
+
+```
+data: {"error":"upstream_unreachable"}
+
+data: {"done":true}
+```
+
+<Note>
+  The streaming protocol is a simplified, stable wrapper around Gemini's own SSE format. Clients only need to handle `{t: string}`, `{done: true}`, and `{error: string}` shapes — never Gemini's internal response schema.
+</Note>
+
+## Gemini model waterfall
+
+The endpoint tries models in order until one responds successfully. The sequence is:
+
+1. `GEMINI_MODEL` environment variable (if set)
+2. `gemini-flash-lite-latest`
+3. `gemini-3.1-flash-lite-preview`
+4. `gemini-flash-latest`
+5. `gemini-3.5-flash`
+
+A model is skipped and the next is tried on HTTP 404, 429, 500, 502, 503, or 504. Any other status code (including success) stops the waterfall. If all models fail, the endpoint returns `upstream_unreachable`.
+
+<Note>
+  Non-streaming requests have a 15-second per-model timeout enforced with `AbortSignal.timeout`. Streaming requests do not apply a timeout to the body read phase to allow for long responses.
+</Note>
+
+## Error codes
+
+| Code | HTTP | Cause |
+|------|------|-------|
+| `not_configured` | 500 | `GEMINI_API_KEY` is not set |
+| `signed_out` | 401 | Missing, invalid, or expired `Authorization` header; anonymous Firebase session |
+| `bad_request` | 400 | Request body is not valid JSON, `messages` is not an array, last message is not from `"user"`, or image validation failed |
+| `rate_limited` | 429 | All tried models returned 429 |
+| `upstream_error` | 502 | Gemini returned an error that is not a retryable status; includes `status` and `detail` fields |
+| `upstream_unreachable` | 502 | All models in the waterfall failed or the network was unreachable; includes a `tried` array |
+| `empty_reply` | 502 | Gemini responded successfully but produced no text content |
+
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | Yes | Your Gemini API key |
+| `FIREBASE_API_KEY` | Yes | The public Firebase web API key from `js/02-firebase-config.js`; used to verify the caller's ID token |
+| `GEMINI_MODEL` | No | Preferred Gemini model; prepended to the built-in fallback list |
+
+## Examples
+
+### Non-streaming request
+
+```bash
+curl -s -X POST https://example.com/api/chat \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <firebase-id-token>" \
+  -d '{
+    "messages": [
+      { "role": "user", "text": "Where is the Nile River?" }
+    ]
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "reply": "The <strong>Nile River</strong> flows northward through northeastern Africa..."
+}
+```
+
+### Streaming request
+
+```bash
+curl -s -N -X POST https://example.com/api/chat \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <firebase-id-token>" \
+  -d '{
+    "messages": [
+      { "role": "user", "text": "Tell me about the Silk Road." }
+    ],
+    "stream": true
+  }'
+```
+
+**Response (SSE stream):**
+
+```
+data: {"t":"The <strong>Silk Road</strong> was a network of trade routes"}
+
+data: {"t":" connecting China to the Mediterranean..."}
+
+data: {"done":true}
+```
+
+### Request with Canvas context
+
+```bash
+curl -s -X POST https://example.com/api/chat \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <firebase-id-token>" \
+  -d '{
+    "messages": [
+      { "role": "user", "text": "What assignments are due this week?" }
+    ],
+    "ctx": "Current assignments: World History Essay due Friday (not submitted), Map Quiz due Thursday (submitted, 94/100)"
+  }'
+```

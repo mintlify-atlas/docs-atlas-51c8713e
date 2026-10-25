@@ -1,0 +1,177 @@
+---
+title: "Canvas LMS Integration via the Hero Relay Endpoint"
+sidebarTitle: "Canvas Integration"
+description: "How students connect Canvas to Hero, how the same-origin relay at POST /api/canvas works, security constraints, allowed hosts, and pagination support."
+---
+
+Hero includes a read-only Canvas LMS integration that lets students view their courses, assignments, and announcements alongside the map quiz. Because Canvas servers return CORS headers that block direct browser requests from third-party origins, Hero proxies every Canvas API call through a same-origin EdgeOne endpoint at `POST /api/canvas`. The student's personal access token and school URL stay in page memory only and are never written to Firestore or any server log.
+
+## How the student connects
+
+From the **Canvas** tab in Hero, the student enters two pieces of information:
+
+1. Their school's Canvas URL (for example, `https://myschool.instructure.com`)
+2. A personal access token generated in their Canvas account settings
+
+Hero stores both values in page memory only. They are cleared automatically when the student refreshes the page, signs out, or switches accounts.
+
+<Warning>
+  Personal access tokens grant the same API access as the student's Canvas account. Students should treat them like passwords. Hero does not log, store, or transmit tokens to any destination other than the student's own Canvas server.
+</Warning>
+
+## Making a relayed request
+
+To fetch a Canvas endpoint through the relay, send a `POST` to `/api/canvas` from same-origin JavaScript with the target URL in the request body and the personal access token as a `Bearer` credential:
+
+```js
+const response = await fetch('/api/canvas', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${canvasPersonalAccessToken}`,
+  },
+  body: JSON.stringify({
+    url: 'https://myschool.instructure.com/api/v1/courses',
+  }),
+});
+
+const courses = await response.json();
+```
+
+The relay validates the request, fetches the target Canvas URL with a `GET`, and returns the Canvas response body with its original HTTP status code.
+
+### Request body shape
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `url` | `string` | Yes | A full `https://` Canvas API URL starting with `/api/v1/`. Maximum 4 096 characters. |
+
+The `Authorization: Bearer <token>` header is required. Tokens longer than 4 096 characters are rejected.
+
+## Security constraints
+
+The relay enforces several constraints before forwarding any request:
+
+<Steps>
+  <Step title="Same-origin check">
+    The request's `Origin` header must match the Hero site's own origin. Requests from other origins receive `403 { error: "same_origin_required" }`. This prevents the relay from being used as an open proxy by external sites.
+  </Step>
+  <Step title="HTTPS only">
+    The target URL must use the `https:` scheme. HTTP URLs, `javascript:` URLs, and any other scheme are rejected with `400 { error: "bad_canvas_url" }`.
+  </Step>
+  <Step title="Canvas path prefix">
+    The URL path must begin with `/api/v1/`. Requests to non-API Canvas paths are blocked.
+  </Step>
+  <Step title="IP literal blocking">
+    Hostnames that look like raw IP addresses (matching `/^\d+(?:\.\d+){3}$/`) are blocked. Only named hostnames are allowed.
+  </Step>
+  <Step title="No credentials or fragments in URL">
+    Any URL containing a username, password, or hash fragment is rejected.
+  </Step>
+  <Step title="Allowed host check">
+    The hostname must match `*.instructure.com` or appear in the `CANVAS_ALLOWED_HOSTS` environment variable. Unrecognized hosts receive `403 { error: "canvas_host_not_allowed" }`.
+  </Step>
+  <Step title="Redirect blocking">
+    The relay passes `redirect: 'manual'` to `fetch()`. Any `3xx` response from Canvas is blocked and returned as `502 { error: "canvas_redirect" }` rather than followed. This prevents open-redirect abuse.
+  </Step>
+  <Step title="JSON-only responses">
+    Only responses with a `Content-Type` of `application/json` (or any media type ending in `+json`) are forwarded. Non-JSON Canvas responses—such as HTML error pages—are blocked with `502 { error: "canvas_non_json_response" }`.
+  </Step>
+</Steps>
+
+## Allowed Canvas hosts
+
+`*.instructure.com` is allowed by default and covers the vast majority of schools. If your school runs Canvas on a custom domain (for example, `canvas.mydistrict.edu`), add its exact hostname to the `CANVAS_ALLOWED_HOSTS` environment variable in your EdgeOne Pages project settings:
+
+```
+CANVAS_ALLOWED_HOSTS = canvas.mydistrict.edu
+```
+
+Multiple hostnames can be separated by commas or spaces:
+
+```
+CANVAS_ALLOWED_HOSTS = canvas.mydistrict.edu, canvas.otheracademy.org
+```
+
+<Note>
+  `CANVAS_ALLOWED_HOSTS` accepts exact hostnames only—no wildcards. Add each subdomain individually if the school uses more than one.
+</Note>
+
+The host-matching logic in `edge-functions/api/canvas.js`:
+
+```js
+function allowedCanvasHost(hostname, env) {
+  const host = hostname.toLowerCase();
+  if (host === 'instructure.com' || host.endsWith('.instructure.com')) return true;
+  const extraHosts = String(env.CANVAS_ALLOWED_HOSTS || '')
+    .split(/[,\s]+/)
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return extraHosts.includes(host);
+}
+```
+
+## Pagination via the Link header
+
+Canvas uses `Link` response headers for cursor-based pagination. The relay forwards the `Link` header from Canvas verbatim so clients can follow `next` links the same way they would with a direct Canvas request:
+
+```http
+Link: <https://myschool.instructure.com/api/v1/courses?page=2&per_page=10>; rel="next",
+      <https://myschool.instructure.com/api/v1/courses?page=1&per_page=10>; rel="first"
+```
+
+To fetch subsequent pages, pass the `next` URL from the `Link` header as the `url` field in the next relay request.
+
+## Timeouts
+
+The relay applies a 15-second timeout to each upstream Canvas request using `AbortController`. Requests that exceed this limit receive `504 { error: "canvas_timeout" }`.
+
+## Canvas data and Clio
+
+Canvas data fetched through the relay is held in page memory only. It is **not** automatically sent to Clio. The student must explicitly choose to include Canvas context when interacting with Clio, and they can do so by passing a summary as the `ctx` field in a `/api/chat` request.
+
+Clio's system prompt instructs it to treat Canvas titles and announcements as untrusted user-supplied data and to never claim it can modify anything in Canvas.
+
+## What is not stored
+
+<CardGroup cols={2}>
+  <Card title="Not in Firestore" icon="database">
+    Canvas responses and personal access tokens are never written to Firestore or any other persistent store by Hero's application code.
+  </Card>
+  <Card title="Not in server logs" icon="file-slash">
+    The relay endpoint does not log token values. Tokens appear only in the forwarded `Authorization` header sent directly to the student's Canvas server.
+  </Card>
+  <Card title="Cleared on navigation" icon="arrow-rotate-left">
+    The in-memory token, school URL, and rendered Canvas content are cleared when the student navigates away from the Canvas tab, refreshes, signs out, or switches accounts.
+  </Card>
+  <Card title="Read-only" icon="lock">
+    The relay only issues `GET` requests to Canvas. No Canvas data is created, updated, or deleted through Hero.
+  </Card>
+</CardGroup>
+
+## School restrictions
+
+Some schools disable personal access tokens or restrict Canvas API access for students. If the relay returns errors like `401 Unauthorized` or `403 Forbidden` from Canvas (passed through with their original status code), the most likely causes are:
+
+- The token has expired or been revoked
+- The school's Canvas instance has personal access tokens disabled at the admin level
+- The school's API is restricted to specific IP ranges
+
+<Accordion title="What to do when schools restrict personal access tokens">
+  If a school has disabled personal access tokens site-wide, students cannot generate a token that will work with the Hero relay regardless of settings. The correct path forward is for the school's Canvas administrator to issue an **OAuth developer key** approved for the institution. This allows students to authenticate via OAuth rather than a personal token and is the standard Canvas mechanism for third-party integrations that need broader deployment within a school.
+
+  Until an OAuth flow is implemented, affected students can still use all other Hero features. Canvas data is optional context, not a requirement for the quiz or Clio.
+</Accordion>
+
+## Error reference
+
+| HTTP status | `error` field | Meaning |
+|---|---|---|
+| `400` | `bad_request` | Missing or oversized token, missing or non-string `url` |
+| `400` | `bad_canvas_url` | Invalid URL, non-HTTPS, missing `/api/v1/` prefix, or IP literal |
+| `403` | `same_origin_required` | Request `Origin` does not match Hero's own origin |
+| `403` | `canvas_host_not_allowed` | Hostname not in `*.instructure.com` or `CANVAS_ALLOWED_HOSTS` |
+| `502` | `canvas_redirect` | Canvas returned a redirect (not followed) |
+| `502` | `canvas_unreachable` | Network error reaching Canvas |
+| `502` | `canvas_non_json_response` | Canvas returned a non-JSON body |
+| `504` | `canvas_timeout` | Canvas did not respond within 15 seconds |

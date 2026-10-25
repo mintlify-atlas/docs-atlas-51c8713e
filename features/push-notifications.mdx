@@ -1,0 +1,260 @@
+---
+title: "Push Notifications via Firebase Cloud Messaging in Hero"
+sidebarTitle: "Push Notifications"
+description: "Set up web push for Hero announcements: FCM HTTP v1, VAPID keys, Firestore token storage, IAM roles, and how the send pipeline works."
+---
+
+Hero delivers announcements to opted-in browsers using **Firebase Cloud Messaging (FCM) HTTP v1 Web Push**. When a steward posts an announcement from the admin panel, a single API call fans out to every registered token — up to 10,000 devices — without the browser being open. This page covers the end-to-end setup and the internals of the send pipeline.
+
+## How opt-in works
+
+Users opt in under **Settings → Notifications**. When they enable notifications, the browser:
+
+1. Fetches the VAPID public key from `GET /api/push-config`.
+2. Calls `PushManager.subscribe()` with that key.
+3. Saves the resulting FCM token to Firestore at:
+
+```text
+artifacts/{siteId}/public/data/members/{uid}/pushTokens/{tokenId}
+```
+
+Each token document has the shape:
+
+```json
+{
+  "token": "<FCM registration token>",
+  "enabled": true,
+  "updatedAt": "<server timestamp>"
+}
+```
+
+The Firestore rules allow each signed-in member to create and delete only their own token documents:
+
+```text
+match /pushTokens/{tokenId} {
+  allow create, update: if signedIn()
+    && request.auth.uid == memberId
+    && request.resource.data.keys().hasOnly(['token', 'enabled', 'updatedAt'])
+    && request.resource.data.token.size() >= 100
+    && request.resource.data.token.size() <= 4096
+    && request.resource.data.enabled == true;
+  allow delete: if isAdmin() || (signedIn() && request.auth.uid == memberId);
+}
+```
+
+## VAPID config endpoint
+
+`GET /api/push-config` returns the public VAPID key. Because it is a **public** key, it is returned to the browser without authentication:
+
+```js
+export function onRequestGet(context) {
+  const vapidKey = String(context.env.FIREBASE_WEB_PUSH_VAPID_KEY || '').trim();
+  return json({ enabled: !!vapidKey, vapidKey: vapidKey || null });
+}
+```
+
+| Field | Value when configured | Value when not configured |
+|-------|-----------------------|--------------------------|
+| `enabled` | `true` | `false` |
+| `vapidKey` | The public VAPID key string | `null` |
+
+The browser checks `enabled` before attempting subscription and surfaces a message if push is not yet configured.
+
+## Service worker
+
+The file `firebase-messaging-sw.js` at the site root handles background messages. It uses the Firebase Messaging compat SDK and listens for FCM payloads when the tab is closed or in the background:
+
+```js
+messaging.onBackgroundMessage(({ data = {} }) => {
+  const title = data.title || 'Hero update';
+  return self.registration.showNotification(title, {
+    body: data.body || 'There is a new announcement in Hero.',
+    icon: '/hero-push-icon.svg',
+    badge: '/hero-push-icon.svg',
+    data: { url: data.url || '/' },
+    tag: 'hero-announcement',
+  });
+});
+```
+
+Clicking a notification focuses an existing Hero tab if one is open, or opens a new window. The `tag: 'hero-announcement'` field collapses multiple unread pushes into a single notification.
+
+The push payload sent by the edge function always includes a `url` field pointing to the announcements inbox:
+
+```json
+{
+  "title": "New from Hero",
+  "body": "Check out the latest announcement.",
+  "url": "/?hero=announcements"
+}
+```
+
+<Note>
+  The `firebase-messaging-sw.js` file must stay in sync with the Firebase app config in `js/02-firebase-config.js`. Both files reference the same `projectId`, `messagingSenderId`, and `appId`.
+</Note>
+
+## Sending announcements
+
+Stewards send pushes from the admin panel. The browser POSTs to `POST /api/push-announcement` with a signed admin token, the announcement title, and body. The edge function handles the entire fan-out:
+
+<Steps>
+  <Step title="Authenticate the request">
+    The request must include a valid admin token (an HMAC of a timestamp keyed with `ADMIN_PASSWORD`). Unauthenticated requests receive `401`.
+  </Step>
+  <Step title="Obtain a Google access token">
+    The function mints a short-lived OAuth 2.0 token by signing a JWT with the service-account private key. The scopes requested are `firebase.messaging` and `datastore`.
+  </Step>
+  <Step title="Page through push tokens from Firestore">
+    The function queries the `pushTokens` collection group (all descendants) with `enabled == true`, paging in batches of 500 up to a maximum of 10,000 tokens:
+
+    ```js
+    for (let offset = 0; offset < 10000; offset += 500) {
+      const response = await fetch(`${root}:runQuery`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: 'pushTokens', allDescendants: true }],
+            where: {
+              fieldFilter: {
+                field: { fieldPath: 'enabled' },
+                op: 'EQUAL',
+                value: { booleanValue: true },
+              },
+            },
+            limit: 500,
+            offset,
+          },
+        }),
+      });
+      // ...
+      if (docs.length < 500) break;
+    }
+    ```
+  </Step>
+  <Step title="Fan out to FCM in parallel batches of 20">
+    Tokens are sent to the FCM HTTP v1 API in concurrent groups of 20:
+
+    ```js
+    for (let start = 0; start < tokenDocs.length; start += 20) {
+      const results = await Promise.all(
+        tokenDocs.slice(start, start + 20).map(sendOne)
+      );
+    }
+    ```
+  </Step>
+  <Step title="Auto-remove expired or unregistered tokens">
+    If FCM returns `404` or the error code `UNREGISTERED`, the token document is deleted from Firestore immediately:
+
+    ```js
+    if (response.status === 404 || errorCode === 'UNREGISTERED') {
+      await fetch(`https://firestore.googleapis.com/v1/${doc.name}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }).catch(() => {});
+      return { sent: 0, removed: 1, failed: 0 };
+    }
+    ```
+  </Step>
+</Steps>
+
+The response includes a summary of the send operation:
+
+```json
+{
+  "ok": true,
+  "sent": 312,
+  "removed": 4,
+  "failed": 0
+}
+```
+
+<Warning>
+  Editing an announcement in the admin panel does **not** send a second push notification. Only the initial publish triggers a send.
+</Warning>
+
+## IAM roles required
+
+The service account identified by `FIREBASE_CLIENT_EMAIL` must have two IAM roles granted in **Google Cloud Console → IAM & Admin → IAM**:
+
+<CardGroup cols={2}>
+  <Card title="Firebase Cloud Messaging API Admin" icon="bell">
+    `roles/firebasecloudmessaging.admin`
+
+    Grants `cloudmessaging.messages.create` so the service account can call the FCM HTTP v1 send endpoint. Do not grant Owner in place of this role.
+  </Card>
+  <Card title="Cloud Datastore Viewer" icon="database">
+    `roles/datastore.viewer`
+
+    Allows the edge function to read `pushTokens` documents. Expired-token deletion is best-effort with this read-only role.
+  </Card>
+</CardGroup>
+
+In addition, **Firebase Cloud Messaging API** must be enabled in **Google Cloud Console → APIs & Services → Enabled APIs & services** for the Firebase project.
+
+## Environment variables
+
+Set all of these in the EdgeOne project settings. Never commit real values to the repository.
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `FIREBASE_WEB_PUSH_VAPID_KEY` | Yes | Public Web Push certificate key from **Firebase Console → Project settings → Cloud Messaging → Web Push certificates** |
+| `FIREBASE_CLIENT_EMAIL` | Yes | Service account email (`client_email` from the service account JSON key) |
+| `FIREBASE_PRIVATE_KEY_1`…`N` | Yes | Service account private key split into chunks ≤ 450 characters; a single `FIREBASE_PRIVATE_KEY` value is also supported |
+| `FIREBASE_PROJECT_ID` | Yes | Firebase project ID; used to construct FCM and Firestore API URLs |
+| `ADMIN_PASSWORD` | Yes | Used to validate the admin token on the announcement request |
+
+The `readPrivateKey` helper in `push-announcement.js` assembles multi-part keys automatically:
+
+```js
+function readPrivateKey(env) {
+  if (env.FIREBASE_PRIVATE_KEY) return env.FIREBASE_PRIVATE_KEY;
+  let key = '';
+  for (let index = 1; index <= 12; index++) {
+    const part = env[`FIREBASE_PRIVATE_KEY_${index}`];
+    if (!part) break;
+    key += String(part).trim();
+  }
+  return key;
+}
+```
+
+If `FIREBASE_CLIENT_EMAIL`, `readPrivateKey`, or `FIREBASE_PROJECT_ID` is missing, the endpoint returns `503 push_sender_not_configured` immediately.
+
+## Error codes
+
+The announcement endpoint returns structured error codes so the admin UI can surface the right message:
+
+| `error` value | HTTP | Cause |
+|---------------|------|-------|
+| `push_sender_not_configured` | 503 | One or more required environment variables is missing |
+| `unauthorized` | 401 | Admin token is missing, expired, or invalid |
+| `invalid_message` | 400 | `title` or `body` is empty after trimming |
+| `firestore_permission_denied` | 502 | The service account lacks `roles/datastore.viewer` |
+| `token_lookup_failed` | 502 | Firestore query failed for another reason |
+| `fcm_permission_denied` | 502 | The service account lacks `roles/firebasecloudmessaging.admin` |
+| `push_send_failed` | 502 | Unhandled error during Google auth or FCM send |
+
+<Tip>
+  The endpoint reports `sent`, `removed`, and `failed` counts even on a `fcm_permission_denied` response. Check these counts in the EdgeOne function logs if delivery looks low.
+</Tip>
+
+## Publish firestore.rules
+
+Token documents are written directly by the browser SDK, so the Firestore rules must be published before push opt-in works. The relevant section of `firestore.rules` is nested under `members/{memberId}`:
+
+```text
+match /pushTokens/{tokenId} {
+  allow get, list: if isAdmin() || (signedIn() && request.auth.uid == memberId);
+  allow create, update: if signedIn()
+    && request.auth.uid == memberId
+    && request.resource.data.keys().hasOnly(['token', 'enabled', 'updatedAt'])
+    && request.resource.data.keys().hasAll(['token', 'enabled', 'updatedAt'])
+    && request.resource.data.token is string
+    && request.resource.data.token.size() >= 100
+    && request.resource.data.token.size() <= 4096
+    && request.resource.data.enabled == true
+    && request.resource.data.updatedAt is timestamp;
+  allow delete: if isAdmin() || (signedIn() && request.auth.uid == memberId);
+}
+```

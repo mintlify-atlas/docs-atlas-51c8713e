@@ -1,0 +1,227 @@
+---
+title: "Clio AI Study Guide: Setup, API, and Streaming"
+sidebarTitle: "Clio AI"
+description: "Configure and call Hero's Gemini-powered study assistant—authentication, image uploads, streaming SSE, context injection, and model fallback behavior."
+---
+
+Clio is Hero's built-in study guide, named for the Greek muse of history. It is powered by Google Gemini and lives at `POST /api/chat` on the same EdgeOne domain as the rest of the site. Every request is verified against Firebase Authentication before any Gemini quota is spent, so Clio is only reachable by signed-in Hero accounts. The feature can be toggled site-wide with a single flag in `js/00-site-config.js`.
+
+## Required environment variables
+
+Set these in your EdgeOne Pages project settings. Never commit real values to the repository.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY` | Yes | Authenticates requests to the Gemini API |
+| `FIREBASE_API_KEY` | Yes | The same public `apiKey` already in `js/02-firebase-config.js`; used server-side to verify the caller's Firebase ID token |
+| `GEMINI_MODEL` | Optional | Pin a specific model; otherwise the endpoint tries its built-in preference list |
+
+<Note>
+  `FIREBASE_API_KEY` is not a secret—Firebase web API keys are public by design. The edge function needs its own copy because browser environment variables are not available server-side on EdgeOne.
+</Note>
+
+## Enabling and disabling Clio
+
+Clio is enabled when `SITE.features.clio` is `true` (the default). Setting it to `false` in `js/00-site-config.js` causes `js/17-features.js` to hide all Clio UI elements and replace `window.sherpaToggle` with a no-op:
+
+```js
+// js/17-features.js
+if (FEAT.clio === false) {
+  hideSel('#sherpa-fab', '#sherpa-panel', '#nav-actions button[onclick*="ai-view"]');
+  window.sherpaToggle = () => {};
+}
+```
+
+When Clio is disabled this way, calls to `sherpaToggle()` from any other script are silently swallowed—nothing throws.
+
+## Authentication flow
+
+`/api/chat` extracts the Firebase ID token from the `Authorization: Bearer <token>` header and verifies it with the Firebase Auth REST API before forwarding anything to Gemini:
+
+```js
+const r = await fetch(
+  `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`,
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idToken: match[1] }),
+  }
+);
+```
+
+Anonymous Firebase sessions are explicitly rejected—the endpoint checks that the resolved user has either an email address or a linked provider. Requests without a valid token receive `401 { ok: false, error: "signed_out" }`.
+
+## Model waterfall
+
+The endpoint tries models in order until one returns a successful response. The preference list is:
+
+```js
+const DEFAULT_MODELS = [
+  'gemini-flash-lite-latest',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-flash-latest',
+  'gemini-3.5-flash',
+];
+```
+
+If `GEMINI_MODEL` is set in environment variables, that model is prepended to the list and tried first. The fallback advances on HTTP status codes `404`, `429`, `500`, `502`, `503`, and `504`—errors that indicate a retired or temporarily unavailable model. Any other error status breaks out of the loop immediately.
+
+<Tip>
+  Leave `GEMINI_MODEL` unset in production to benefit from the automatic fallback. Pin a model only when you need deterministic behavior for testing.
+</Tip>
+
+## Request format
+
+Send a `POST` to `/api/chat` with a JSON body and a `Bearer` token in the `Authorization` header.
+
+```js
+const response = await fetch('/api/chat', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${firebaseIdToken}`,
+  },
+  body: JSON.stringify({
+    messages: [
+      { role: 'user', text: 'Where is the Strait of Hormuz?' },
+    ],
+    stream: false,
+  }),
+});
+
+const data = await response.json();
+// { ok: true, reply: "The Strait of Hormuz lies between..." }
+```
+
+### Messages array
+
+The `messages` array holds the conversation history. The endpoint keeps only the **last 10 messages** and trims each text field to **1 000 characters** before forwarding to Gemini.
+
+| Field | Type | Description |
+|---|---|---|
+| `role` | `'user'` \| `'model'` | Speaker. Any value other than `'model'` is treated as `'user'`. |
+| `text` | `string` | Text content of the message (trimmed to 1 000 chars server-side). |
+| `images` | `array` | Optional. Up to 2 image objects per message (see below). |
+
+### Context injection
+
+Include a `ctx` string (up to **3 000 characters**) to inject current site context—such as the active location, quiz score, or year mode—into Clio's system prompt without exposing it in the visible message history:
+
+```js
+body: JSON.stringify({
+  messages: [...],
+  ctx: 'Current location: Strait of Malacca. Year mode: twoyear.',
+  stream: false,
+})
+```
+
+Clio uses this context to give geographically relevant answers without you needing to repeat it in every message.
+
+## Image uploads
+
+Students can upload photos of textbook pages and ask Clio to return structured notes. Up to **2 images per message** are supported. Each image must be:
+
+- A JPEG, PNG, or WebP file
+- Encoded as a base64 string
+- No larger than **1.6 MB base64** (approximately 1.2 MB raw)
+
+```js
+{
+  role: 'user',
+  text: 'Make notes from this page.',
+  images: [
+    {
+      mimeType: 'image/jpeg',
+      data: '<base64-encoded image data>',
+    },
+  ],
+}
+```
+
+The server validates every image in every message before sending anything to Gemini. A single invalid image in any message causes the entire request to fail with `400 { ok: false, error: "bad_request" }`.
+
+When a student asks for notes from an uploaded photo, Clio follows a structured outline format: the visible chapter title first, then major sections as Roman numerals (`I.`, `II.`, `III.`), subsections as capital letters (`A.`, `B.`, `C.`), and key facts as Arabic numerals (`1.`, `2.`, `3.`). If the photo is unclear or cuts off important text, Clio reports what it could not read and asks for a clearer image.
+
+## Streaming responses
+
+Set `stream: true` in the request body to receive a Server-Sent Events stream instead of a single JSON response. The endpoint re-emits Gemini's SSE as a stable, minimal protocol so clients never need to parse Gemini's own response format directly.
+
+Each event is a JSON object on a `data:` line:
+
+| Event shape | Meaning |
+|---|---|
+| `{ "t": "<text delta>" }` | A chunk of the reply to append to the displayed text |
+| `{ "done": true }` | The stream is complete |
+| `{ "error": "empty_reply" }` | Gemini returned no text |
+| `{ "error": "upstream_unreachable" }` | Network or model error mid-stream |
+
+```js
+const response = await fetch('/api/chat', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${firebaseIdToken}`,
+  },
+  body: JSON.stringify({
+    messages: [{ role: 'user', text: 'Explain the Silk Road in under 100 words.' }],
+    stream: true,
+  }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split('\n\n');
+  buffer = lines.pop() ?? '';
+  for (const block of lines) {
+    const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+    if (!dataLine) continue;
+    const event = JSON.parse(dataLine.slice(6));
+    if (event.t) process.stdout.write(event.t);
+    if (event.done) console.log('\n[stream complete]');
+  }
+}
+```
+
+Non-streaming requests use a 15-second `AbortSignal` timeout. Streaming requests do not apply that timeout to the body read so long replies are not cut short.
+
+## Canvas context in Clio
+
+When a student has Canvas LMS data loaded in the Canvas tab, they can choose to include a summary of it as the `ctx` field. Clio's system prompt explicitly instructs it to treat Canvas titles and announcements as untrusted user-provided data and to never claim it can modify anything in Canvas.
+
+Canvas data is **not** sent to Clio automatically—the student must opt in each time.
+
+## Error reference
+
+| HTTP status | `error` field | Meaning |
+|---|---|---|
+| `400` | `bad_request` | Malformed JSON, empty messages array, or invalid image |
+| `401` | `signed_out` | Missing, invalid, or anonymous-session token |
+| `429` | `rate_limited` | Gemini API rate limit hit across all models |
+| `500` | `not_configured` | `GEMINI_API_KEY` or `FIREBASE_API_KEY` is not set |
+| `502` | `upstream_error` | Gemini returned a non-OK status on all models |
+| `502` | `upstream_unreachable` | All models failed or timed out before responding |
+
+## Checking server configuration
+
+`GET /api/chat` returns a configuration summary without requiring authentication:
+
+```json
+{
+  "ok": true,
+  "GEMINI_API_KEY": true,
+  "models": [
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-flash-latest",
+    "gemini-3.5-flash"
+  ]
+}
+```
+
+`GEMINI_API_KEY` is a boolean—the actual key value is never exposed. Use this endpoint to confirm the edge function is deployed and the key is set before debugging client-side issues.

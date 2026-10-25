@@ -1,0 +1,141 @@
+---
+title: "Deploy Hero to EdgeOne Pages as a Static Site"
+sidebarTitle: "EdgeOne Deploy"
+description: "Connect Hero's repo to EdgeOne Pages, set required environment variables, verify the cache-busting build output, and learn how edge functions read secrets."
+---
+
+Hero deploys as a static site on Tencent EdgeOne Pages. The repository includes an `edgeone.json` that tells EdgeOne to run `npm run build` before publishing each deployment. That build script stamps every local JS and CSS URL in `index.html` with a content hash and writes a unique build ID into the HTML, so running browsers always know whether a newer deployment has arrived. Edge functions in `edge-functions/api/` handle all server-side logic and read secrets exclusively from `context.env` — nothing private ever reaches the browser.
+
+## How the build works
+
+`edgeone.json` specifies a single build command:
+
+```json edgeone.json
+{
+  "buildCommand": "npm run build",
+  "headers": [
+    {
+      "source": "/",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    },
+    {
+      "source": "/index.html",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    },
+    {
+      "source": "/js/*",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+    },
+    {
+      "source": "/css/*",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+    }
+  ]
+}
+```
+
+`npm run build` resolves to `node scripts/cache-bust-assets.mjs`, which:
+
+1. Reads every `src=` and `href=` attribute in `index.html` that points to a `/js/` or `/css/` file.
+2. Computes a 16-character SHA-256 content hash for each file and appends `?v=<hash>` to its URL.
+3. Derives a unique `buildId` from a hash of the full HTML content plus a UUID, and writes it into `<meta name="hero-build-id">`.
+4. Logs `Stamped N local assets for build <buildId>.` — that line is your confirmation in the EdgeOne build log.
+
+### Cache strategy
+
+| Resource | Cache-Control header | Rationale |
+|---|---|---|
+| `/` and `/index.html` | `no-cache, no-store, must-revalidate` | Browser always fetches the latest HTML and build ID |
+| `/firebase-messaging-sw.js` | `no-cache, no-store, must-revalidate` | Service-worker updates must reach the browser immediately |
+| `/js/*` | `public, max-age=31536000, immutable` | Content-hashed URLs make each version unique; safe to cache for one year |
+| `/css/*` | `public, max-age=31536000, immutable` | Same policy as JS files |
+
+Because `index.html` is never cached, open tabs receive fresh asset URLs on each deployment. The site checks for a new build ID every 30 seconds and announces the update before reloading. Users can click **Not now** to stay on the current version until they are ready.
+
+## Deployment steps
+
+<Steps>
+  <Step title="Create an EdgeOne Pages project">
+    In the EdgeOne console, create a new Pages project and connect it to the Hero GitHub repository. Select the branch you want to deploy (typically `main`).
+  </Step>
+
+  <Step title="Confirm the build command">
+    EdgeOne reads `edgeone.json` automatically. The build command is already set to `npm run build` — you do not need to configure it manually. If the field is empty in the project settings, enter `npm run build`.
+  </Step>
+
+  <Step title="Add all environment variables">
+    In the EdgeOne Pages project settings, add the variables below. Never commit real values to the repository.
+
+    | Variable | Required | Purpose |
+    |---|---|---|
+    | `ADMIN_PASSWORD` | Yes | Steward sign-in and signing admin session tokens |
+    | `DEV_ACCESS` | Yes for early access | Unlocks the launch countdown and Dev Mode controls |
+    | `FIREBASE_CLIENT_EMAIL` | Yes for admin sign-in and account recovery | Firebase service-account email |
+    | `FIREBASE_PRIVATE_KEY_1` … `FIREBASE_PRIVATE_KEY_N` | Yes for admin sign-in and account recovery | Private key split into chunks of 450 characters or fewer |
+    | `FIREBASE_API_KEY` | Yes for Clio and account recovery | The public Firebase web API key from `js/02-firebase-config.js` |
+    | `ACCOUNT_RECOVERY_PEPPER` | Yes for account recovery | Private random value used to HMAC recovery codes |
+    | `DEPLOY_WEBHOOK_URL` | Yes for Steward redeploy | EdgeOne build/deploy webhook URL |
+    | `GITHUB_TOKEN` | Yes for Steward redeploy | GitHub token with repository contents read/write |
+    | `GITHUB_REPOSITORY` | Yes for Steward redeploy | Repository as `owner/name`, e.g. `crwcln/heroapp` |
+    | `DEPLOY_BRANCH` | Optional | Branch to target; defaults to `main` |
+    | `GEMINI_API_KEY` | Optional | Enables Clio AI chat |
+    | `FIREBASE_WEB_PUSH_VAPID_KEY` | Yes for push notifications | Public Web Push VAPID key from Firebase Console |
+    | `FIREBASE_SITE_ID` | Optional | Firestore namespace; defaults to `hero-2026` |
+    | `CANVAS_ALLOWED_HOSTS` | Optional | Additional hostnames for custom Canvas domains |
+
+    <Warning>
+      Firebase Admin values (`FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY_*`) must belong to the same Firebase project used in `js/02-firebase-config.js`. The Firebase web config is public browser configuration — only service-account keys are secrets.
+    </Warning>
+  </Step>
+
+  <Step title="Push to the deploy branch">
+    Commit and push to the configured deploy branch. EdgeOne detects the push, clones the repository, runs `npm run build`, and publishes the output. You can also trigger a deployment from the EdgeOne console without pushing a new commit.
+  </Step>
+
+  <Step title="Verify the deployment">
+    Open **Build & Deploy** in the EdgeOne console and confirm:
+
+    - The build log contains the line `Stamped N local assets for build <buildId>.`
+    - In the deployed `index.html`, `/js/00-site-config.js` appears as `/js/00-site-config.js?v=<hash>` — not a bare URL.
+
+    If either check fails, the build script did not run. Confirm `edgeone.json` is present at the repository root and that the build command resolves correctly.
+  </Step>
+</Steps>
+
+## Edge functions
+
+All server-side logic lives in `edge-functions/api/`. Each file exports one or more named handlers that EdgeOne invokes at the network edge:
+
+```
+edge-functions/api/
+  auth.js              POST /api/auth
+  deploy.js            POST /api/deploy
+  chat.js              POST /api/chat
+  canvas.js            GET  /api/canvas
+  config.js            GET  /api/config
+  account-recovery.js  POST /api/account-recovery
+  push-announcement.js POST /api/push-announcement
+  push-config.js       GET  /api/push-config
+  firebase-token.js    POST /api/firebase-token
+```
+
+Each handler is exported as `onRequestPost` or `onRequestGet`:
+
+```js
+export async function onRequestPost(context) {
+  const secret = context.env.ADMIN_PASSWORD; // read from EdgeOne env, never from the browser bundle
+  // ...
+}
+```
+
+<Note>
+  All secrets are read from `context.env` inside edge functions. They are never embedded in browser JavaScript, committed to the repository, or returned in API responses. The Firebase web configuration in `js/02-firebase-config.js` is public browser config, not a secret.
+</Note>
+
+## Construction-page visitor message
+
+When Dev Mode is enabled, visitors see a construction page with a configurable message. To change the message, sign in to the admin panel and edit the **Visitor construction message** field in the **Dev Mode** card. Leave the field blank to restore the default message.
+
+<Tip>
+  The construction message is stored server-side and does not require a new deployment to take effect.
+</Tip>

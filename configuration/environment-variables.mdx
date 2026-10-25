@@ -1,0 +1,152 @@
+---
+title: "EdgeOne Environment Variables for Hero Deployments"
+sidebarTitle: "Environment Variables"
+description: "Complete reference for every EdgeOne environment variable Hero reads — what each does, when it is required, and how to generate sensitive values safely."
+---
+
+Hero's EdgeOne edge functions read configuration and secrets exclusively from environment variables set in the EdgeOne Pages project settings. Nothing sensitive should appear in the repository or in browser-facing JavaScript. This page covers every variable Hero recognises, organised by functional area, so you can set exactly what your deployment needs without guessing.
+
+<Warning>
+  Never commit real values for any of these variables to the repository. API keys, private key chunks, passwords, and tokens must exist only in EdgeOne project settings (or a secrets manager that feeds them). Anyone with read access to the repository must not gain access to production credentials.
+</Warning>
+
+## Core
+
+<ParamField path="ADMIN_PASSWORD" type="string" required>
+  The password for the Steward (site administrator) account. This value is used both to verify admin sign-in attempts and to sign server-side admin sessions. Choose a strong, unique password and store it only in EdgeOne secrets.
+</ParamField>
+
+<ParamField path="DEV_ACCESS" type="string">
+  Required for early-access deployments. When set, this value unlocks the launch countdown override and the development mode controls in the admin panel. The legacy variable name `DEV_PASSWORD` is still accepted as a fallback but `DEV_ACCESS` is preferred for new deployments.
+</ParamField>
+
+## Firebase service account (admin operations and account recovery)
+
+These variables together identify the Firebase service account that EdgeOne edge functions use for privileged operations — admin sign-in, account recovery, and push notifications. All values come from the service account JSON key downloaded from Firebase Console.
+
+<ParamField path="FIREBASE_CLIENT_EMAIL" type="string">
+  Required for secure admin sign-in and account recovery. The `client_email` field from the service account JSON key, for example `firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com`.
+</ParamField>
+
+<ParamField path="FIREBASE_PRIVATE_KEY_1" type="string">
+  Required for secure admin sign-in and account recovery. The first chunk (up to 450 characters) of the service account private key. The edge functions reassemble all numbered `FIREBASE_PRIVATE_KEY_N` variables at runtime to reconstruct the full PEM key.
+
+  Split the `private_key` value from the JSON file into consecutive chunks of at most 450 characters and place them in `FIREBASE_PRIVATE_KEY_1`, `FIREBASE_PRIVATE_KEY_2`, `FIREBASE_PRIVATE_KEY_3`, and so on. Include the `-----BEGIN PRIVATE KEY-----` header in the first chunk, the `-----END PRIVATE KEY-----` footer in the final chunk, and all `\n` escape sequences exactly as they appear in the JSON.
+
+  A single `FIREBASE_PRIVATE_KEY` variable (without a number suffix) is also accepted when the key fits within one variable's length limit.
+</ParamField>
+
+<ParamField path="FIREBASE_PROJECT_ID" type="string">
+  Optional. The Firebase project ID (for example `heroapp-cc053`). Required for account recovery if it cannot be derived automatically from `FIREBASE_CLIENT_EMAIL`. If your client email follows the standard `firebase-adminsdk-xxxxx@PROJECT_ID.iam.gserviceaccount.com` pattern, the edge functions extract the project ID from it and this variable can be omitted.
+</ParamField>
+
+## Firebase web API
+
+<ParamField path="FIREBASE_API_KEY" type="string">
+  Required for Clio (AI chat) and account recovery. This is the same public `apiKey` value already present in `js/02-firebase-config.js`. The edge functions cannot read browser-bundle files, so a separate copy is needed here. This key is public by design — Firebase web API keys are not secrets — but it must be set for the server-side Firebase Auth token verification to succeed.
+</ParamField>
+
+<ParamField path="FIREBASE_SITE_ID" type="string">
+  Optional. The Firestore data namespace used by account-recovery records. Defaults to `hero-2026`. Set this to match `SITE.id` in `js/00-site-config.js` whenever you change the site's `id` field, so that edge functions and browser code target the same Firestore namespace.
+</ParamField>
+
+## Account recovery
+
+<ParamField path="ACCOUNT_RECOVERY_PEPPER" type="string">
+  Required for account recovery. A 64-character hex string used as a secret input to the HMAC that protects one-time recovery codes. This value is never sent to browsers or stored in Firestore; only the HMAC output is stored. Generate a fresh value for each deployment and never reuse it for another purpose.
+
+  <Note>
+    Generate a suitable value locally with Node.js:
+
+    ```bash
+    node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+    ```
+
+    Copy the output directly into EdgeOne secrets. Do not save it to any file in the repository.
+  </Note>
+</ParamField>
+
+## Deploy automation
+
+<ParamField path="DEPLOY_WEBHOOK_URL" type="string">
+  Required for the Steward redeploy action. The EdgeOne build/deploy webhook URL. When a steward triggers a redeploy from the admin panel, the edge function creates an empty Git commit on the configured branch and then calls this URL to ask EdgeOne to start a new build.
+</ParamField>
+
+<ParamField path="GITHUB_TOKEN" type="string">
+  Required for the Steward redeploy action. A GitHub personal access token (or fine-grained token) with read and write access to repository contents. The edge function needs this to push the empty commit that triggers the build.
+</ParamField>
+
+<ParamField path="GITHUB_REPOSITORY" type="string">
+  Optional. The repository in `owner/name` format. Defaults to `crwcln/heroapp`. Override this when running Hero from a fork or a renamed repository.
+</ParamField>
+
+<ParamField path="DEPLOY_BRANCH" type="string">
+  Optional. The branch the redeploy action commits to. Defaults to `main`. Change this to match your deployment branch if you use a different default branch name.
+</ParamField>
+
+## Clio AI
+
+<ParamField path="GEMINI_API_KEY" type="string">
+  Optional. An API key for Google Gemini. When set, the Clio AI chat feature is active and the `/api/chat` edge function will process user queries. Without this key the Clio panel is non-functional even if the `features.clio` flag in `js/00-site-config.js` is `true`.
+</ParamField>
+
+<ParamField path="GEMINI_MODEL" type="string">
+  Optional. Overrides the ordered model preference list in `edge-functions/api/chat.js`. Set this to a specific Gemini model identifier (for example `gemini-1.5-pro`) if you need to pin the deployment to a particular model version rather than letting the code select from its preference list.
+</ParamField>
+
+## Web push notifications
+
+<ParamField path="FIREBASE_WEB_PUSH_VAPID_KEY" type="string">
+  Required for push notifications. The public Web Push VAPID certificate key from **Firebase Console → Project settings → Cloud Messaging → Web Push certificates**. This is a public key and does not need to be treated as a secret, but it must be set for the browser to subscribe and for the edge function to send notifications via Firebase Cloud Messaging HTTP v1.
+</ParamField>
+
+## Flappy Bird feature overrides
+
+These variables are all optional. When absent, the defaults defined in `js/16-flappy-bird.js` are used.
+
+<ParamField path="FLAPPY_TRIGGER" type="string">
+  Optional. Overrides the score or event condition that unlocks the Flappy Bird easter egg.
+</ParamField>
+
+<ParamField path="FLAPPY_BIRD_URL" type="string">
+  Optional. Overrides the URL used for the Flappy Bird asset or embed.
+</ParamField>
+
+<ParamField path="FLAPPY_GRAVITY" type="string">
+  Optional. Overrides the gravity constant used in the Flappy Bird physics simulation.
+</ParamField>
+
+<ParamField path="FLAPPY_GAP" type="string">
+  Optional. Overrides the gap size between pipes in the Flappy Bird game.
+</ParamField>
+
+## Canvas integration
+
+<ParamField path="CANVAS_ALLOWED_HOSTS" type="string">
+  Optional. A comma- or space-separated list of exact hostnames for Canvas instances that use a custom domain rather than an `*.instructure.com` subdomain. The relay already permits all `*.instructure.com` hosts by default. Add a school's custom Canvas hostname here if students at that institution connect from a non-standard URL and the relay would otherwise reject their requests.
+</ParamField>
+
+## Quick-reference table
+
+| Variable | Required | Area |
+|---|---|---|
+| `ADMIN_PASSWORD` | Yes | Core |
+| `DEV_ACCESS` | Yes for early access | Core |
+| `FIREBASE_CLIENT_EMAIL` | Yes for admin/recovery | Service account |
+| `FIREBASE_PRIVATE_KEY_1` … `FIREBASE_PRIVATE_KEY_N` | Yes for admin/recovery | Service account |
+| `FIREBASE_PROJECT_ID` | Optional | Service account |
+| `FIREBASE_API_KEY` | Yes for Clio and recovery | Web API |
+| `FIREBASE_SITE_ID` | Optional | Web API |
+| `ACCOUNT_RECOVERY_PEPPER` | Yes for recovery | Account recovery |
+| `DEPLOY_WEBHOOK_URL` | Yes for redeploy | Deploy automation |
+| `GITHUB_TOKEN` | Yes for redeploy | Deploy automation |
+| `GITHUB_REPOSITORY` | Optional | Deploy automation |
+| `DEPLOY_BRANCH` | Optional | Deploy automation |
+| `GEMINI_API_KEY` | Optional | Clio AI |
+| `GEMINI_MODEL` | Optional | Clio AI |
+| `FIREBASE_WEB_PUSH_VAPID_KEY` | Yes for push | Web push |
+| `FLAPPY_TRIGGER` | Optional | Flappy Bird |
+| `FLAPPY_BIRD_URL` | Optional | Flappy Bird |
+| `FLAPPY_GRAVITY` | Optional | Flappy Bird |
+| `FLAPPY_GAP` | Optional | Flappy Bird |
+| `CANVAS_ALLOWED_HOSTS` | Optional | Canvas |

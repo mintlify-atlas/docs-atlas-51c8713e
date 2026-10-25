@@ -1,0 +1,167 @@
+---
+title: "Send a Web Push Notification to All Opted-In Browsers"
+sidebarTitle: "POST /api/push-announcement"
+description: "Broadcasts a Web Push notification via Firebase Cloud Messaging to every browser that has opted in; automatically removes expired or unregistered push tokens."
+---
+
+`POST /api/push-announcement` sends a Web Push notification to every browser that has opted in to Hero notifications. The endpoint reads push token documents from the Firestore `pushTokens` collection, fans out FCM send requests in parallel batches, and automatically deletes tokens that FCM reports as expired or unregistered. It requires a valid admin HMAC token obtained from `POST /api/auth`.
+
+<Note>
+  Editing an existing announcement in the admin panel does **not** trigger a second push notification. This endpoint must be called explicitly to send a new notification.
+</Note>
+
+## Request
+
+**Method:** `POST`  
+**Path:** `/api/push-announcement`  
+**Content-Type:** `application/json`  
+**Authentication:** Admin HMAC token in the request body
+
+### Body parameters
+
+<ParamField body="token" type="string" required>
+  A valid admin token obtained from `POST /api/auth` with `target: "admin"`. Valid for 30 minutes. Expired or malformed tokens are rejected with `unauthorized`.
+</ParamField>
+
+<ParamField body="title" type="string" required>
+  The notification title shown in the browser's push notification UI. Maximum 120 characters (server-side truncation). Must not be empty.
+</ParamField>
+
+<ParamField body="body" type="string" required>
+  The notification body text. Maximum 240 characters (server-side truncation). Must not be empty.
+</ParamField>
+
+## Push payload delivered to browsers
+
+Each FCM message is sent with the following structure:
+
+```json
+{
+  "message": {
+    "token": "<browser-fcm-token>",
+    "data": {
+      "title": "Your announcement title",
+      "body": "Your announcement body",
+      "url": "/?hero=announcements"
+    },
+    "webpush": {
+      "headers": {
+        "TTL": "86400",
+        "Urgency": "high"
+      }
+    }
+  }
+}
+```
+
+The `url` field is always `/?hero=announcements`. When a user taps the notification, the browser navigates to the Hero announcements view. The `TTL` of `86400` seconds (24 hours) means FCM will attempt redelivery for up to one day if the browser is offline.
+
+## Token lookup process
+
+The endpoint queries the Firestore `pushTokens` collection using offset pagination in batches of 500 documents, up to a maximum of 10,000 documents. Only documents with `enabled: true` and a non-empty `token` string field are included. FCM send requests are dispatched in parallel batches of 20.
+
+When FCM returns HTTP 404 or an `UNREGISTERED` error code for a token, the corresponding Firestore document is deleted automatically. This keeps the token collection clean over time.
+
+## Response
+
+### 200 — Success
+
+```json
+{
+  "ok": true,
+  "sent": 142,
+  "removed": 3,
+  "failed": 0
+}
+```
+
+<ResponseField name="ok" type="boolean">
+  `true` when the send run completed without a permission error, even if some individual sends failed.
+</ResponseField>
+
+<ResponseField name="sent" type="number">
+  Number of push notifications delivered successfully.
+</ResponseField>
+
+<ResponseField name="removed" type="number">
+  Number of expired or unregistered tokens deleted from Firestore.
+</ResponseField>
+
+<ResponseField name="failed" type="number">
+  Number of tokens for which FCM returned an error other than `UNREGISTERED`. These tokens are not deleted automatically.
+</ResponseField>
+
+### 200 — No opted-in tokens
+
+```json
+{ "ok": true, "sent": 0, "removed": 0, "failed": 0 }
+```
+
+Returned when the `pushTokens` collection contains no documents with `enabled: true`.
+
+## Error codes
+
+| Code | HTTP | Cause |
+|------|------|-------|
+| `push_sender_not_configured` | 503 | One or more required environment variables (`ADMIN_PASSWORD`, `FIREBASE_CLIENT_EMAIL`, private key, or project ID) are not set |
+| `bad_request` | 400 | Request body could not be parsed as JSON |
+| `unauthorized` | 401 | Token is missing, expired, or HMAC verification failed |
+| `invalid_message` | 400 | `title` or `body` is empty after trimming |
+| `firestore_permission_denied` | 502 | Firestore returned HTTP 403 during token lookup; check IAM permissions for the service account |
+| `token_lookup_failed` | 502 | Firestore returned a non-200 status during token lookup; includes `upstreamStatus` |
+| `fcm_permission_denied` | 502 | FCM returned HTTP 403 for at least one message; the `sent`, `removed`, and `failed` counts up to that point are included |
+| `push_send_failed` | 502 | An unexpected error occurred during the send process |
+
+## Required IAM permissions
+
+The Firebase service account (`FIREBASE_CLIENT_EMAIL`) must have the following IAM roles on the Firebase project:
+
+- **Firebase Cloud Messaging API Admin** (`roles/firebasecloudmessaging.admin`) — grants `cloudmessaging.messages.create`
+- **Cloud Datastore Viewer** (`roles/datastore.viewer`) — grants Firestore read access for token lookup
+
+Token deletion is best-effort with the Viewer role. Grant **Cloud Datastore User** (`roles/datastore.user`) if you require reliable automatic deletion of expired tokens.
+
+You must also enable the **Firebase Cloud Messaging API** in Google Cloud Console → APIs & Services → Enabled APIs.
+
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ADMIN_PASSWORD` | Yes | Used to verify the admin token HMAC |
+| `FIREBASE_CLIENT_EMAIL` | Yes | Firebase service-account email address |
+| `FIREBASE_PRIVATE_KEY_1…N` | Yes | Service-account private key split into chunks of ≤ 450 characters; a single `FIREBASE_PRIVATE_KEY` is also accepted |
+| `FIREBASE_PROJECT_ID` | No | Firebase project ID; derived from `FIREBASE_CLIENT_EMAIL` if absent |
+
+## Example
+
+### Step 1 — Obtain an admin token
+
+```bash
+TOKEN=$(curl -s -X POST https://example.com/api/auth \
+  -H "Content-Type: application/json" \
+  -d '{"target": "admin", "password": "your-admin-password"}' \
+  | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+```
+
+### Step 2 — Send a push announcement
+
+```bash
+curl -s -X POST https://example.com/api/push-announcement \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"token\": \"$TOKEN\",
+    \"title\": \"New Quiz Available\",
+    \"body\": \"The Ancient Rome map quiz is now live. Good luck!\"
+  }"
+```
+
+**Successful response:**
+
+```json
+{
+  "ok": true,
+  "sent": 87,
+  "removed": 2,
+  "failed": 0
+}
+```

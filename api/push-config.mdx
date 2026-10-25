@@ -1,0 +1,77 @@
+---
+title: "Return the VAPID Public Key for Web Push Subscriptions"
+sidebarTitle: "GET /api/push-config"
+description: "Returns the VAPID public key browsers need to create a Web Push subscription, and whether push notifications are currently enabled for this deployment."
+---
+
+`GET /api/push-config` returns the VAPID (Voluntary Application Server Identification) public key that a browser must present when creating a Web Push subscription. The endpoint is unauthenticated and returns no secrets — the VAPID key is a public value by design, and browsers require it to call `PushManager.subscribe()`. The `enabled` flag lets the client decide whether to offer the notification opt-in UI without needing to handle a missing key as an error.
+
+## Request
+
+**Method:** `GET`  
+**Path:** `/api/push-config`  
+**Authentication:** None
+
+No request body or query parameters are accepted.
+
+## Response
+
+### 200 — Always returned
+
+```json
+{ "enabled": true, "vapidKey": "BLc2..." }
+```
+
+```json
+{ "enabled": false, "vapidKey": null }
+```
+
+<ResponseField name="enabled" type="boolean">
+  `true` when the `FIREBASE_WEB_PUSH_VAPID_KEY` environment variable is set to a non-empty value. `false` otherwise.
+</ResponseField>
+
+<ResponseField name="vapidKey" type="string | null">
+  The VAPID public key string when `enabled` is `true`. `null` when `FIREBASE_WEB_PUSH_VAPID_KEY` is not configured. This value is passed directly to `PushManager.subscribe({ applicationServerKey: vapidKey })` in the browser.
+</ResponseField>
+
+<Note>
+  The VAPID public key is intentionally public. It is analogous to the `FIREBASE_API_KEY` web config value — it must be sent to the browser, and knowing it does not grant any privileged access to the push infrastructure. The matching VAPID private key remains in Firebase's custody and is never exposed.
+</Note>
+
+## Where to find the VAPID key
+
+The VAPID public key is listed in the Firebase Console under:
+
+**Project settings → Cloud Messaging → Web Push certificates → Key pair**
+
+Copy the public key value and set it as the `FIREBASE_WEB_PUSH_VAPID_KEY` environment variable in the EdgeOne Pages project settings.
+
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `FIREBASE_WEB_PUSH_VAPID_KEY` | Yes (for push) | The public Web Push certificate key from Firebase Console → Project settings → Cloud Messaging → Web Push certificates |
+
+## Example
+
+```bash
+curl -s https://example.com/api/push-config
+```
+
+**Response when push is enabled:**
+
+```json
+{
+  "enabled": true,
+  "vapidKey": "BLc2f8Kx3Y0vQ9wZmT5pN7hR1dA6eJ4bC8iU2sX0oG3kV"
+}
+```
+
+**Response when `FIREBASE_WEB_PUSH_VAPID_KEY` is not set:**
+
+```json
+{
+  "enabled": false,
+  "vapidKey": null
+}
+```

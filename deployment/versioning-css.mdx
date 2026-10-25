@@ -1,0 +1,100 @@
+---
+title: "Versioning, CSS Builds, and npm Scripts Reference"
+sidebarTitle: "Versioning & CSS"
+description: "How to bump the Hero version, rebuild Tailwind CSS, run the cache-busting build, and what every npm script in package.json does and when to use it."
+---
+
+Hero's version lives in two places that must always match: the `version` field in `package.json` and the `version` property inside the `SITE` object in `js/00-site-config.js`. The `release:*` scripts keep them in sync automatically. Generated CSS in `css/tailwind.css` is committed to the repository and rebuilt locally whenever Tailwind inputs change — it is not generated during the EdgeOne build.
+
+## Version management
+
+Run one of the three release scripts to bump the version and rebuild CSS in a single step:
+
+```bash
+npm run release:patch   # 1.2.7  →  1.2.8
+npm run release:minor   # 1.2.7  →  1.3.0
+npm run release:major   # 1.2.7  →  2.0.0
+```
+
+Each script calls `scripts/bump-version.js` with the increment kind, then immediately runs `npm run build:css`. `bump-version.js` rewrites the `version: '...'` literal in `js/00-site-config.js` and updates `package.json` to match. The footer badge, About page, and the git-hook commit prefix all read from `SITE.version` — there is no other version source to update.
+
+<Note>
+  After running a release script, commit both `js/00-site-config.js`, `package.json`, and the rebuilt `css/tailwind.css` together so the repository stays consistent.
+</Note>
+
+## CSS build
+
+Hero uses Tailwind CSS v3. The generated stylesheet is `css/tailwind.css`; never edit it by hand.
+
+```bash
+npm run build:css
+```
+
+This runs:
+
+```bash
+tailwindcss -c tailwind.config.js -i tailwind.input.css -o css/tailwind.css --minify
+```
+
+| File | Purpose |
+|---|---|
+| `tailwind.config.js` | Controls which utilities Tailwind generates — content paths, theme extensions, and plugins |
+| `tailwind.input.css` | Source stylesheet; add `@apply` rules and custom CSS here |
+| `css/tailwind.css` | Minified output; commit this file after rebuilding |
+
+Always commit `css/tailwind.css` after rebuilding. The EdgeOne build step (`npm run build`) only stamps URLs in `index.html` — it does not run Tailwind.
+
+<Warning>
+  If you push changes to `tailwind.input.css` or `tailwind.config.js` without rebuilding and committing `css/tailwind.css`, the deployed site will serve stale styles.
+</Warning>
+
+## Cache-busting build
+
+```bash
+npm run build
+```
+
+This runs `node scripts/cache-bust-assets.mjs`. It reads `index.html`, computes a 16-character SHA-256 content hash for every `/js/` and `/css/` file referenced in `src=` and `href=` attributes, and appends `?v=<hash>` to each URL. It also writes a unique `buildId` — derived from a content hash and a UUID — into `<meta name="hero-build-id">`.
+
+EdgeOne runs this command automatically on every deployment via `edgeone.json`. You can also run it locally to inspect the output, but you should not commit the stamped `index.html` — the build step always produces a fresh hash.
+
+## Git commit hook
+
+```bash
+npm run setup:git-hooks
+```
+
+Run this once after cloning the repository. It installs a `prepare-commit-msg` hook from `scripts/git-hooks/prepare-commit-msg` into your local `.git/hooks/` directory. After installation, every commit made through VS Code (or any Git client that invokes the hook) automatically prepends `v{SITE.version}:` to the commit subject. The message you type is preserved after the prefix — for example, typing `fix map zoom` produces `v1.2.7: fix map zoom`.
+
+<Tip>
+  Re-run `npm run setup:git-hooks` if you delete or recreate your `.git` directory, or after another tool replaces the hook file.
+</Tip>
+
+## Map boundary build
+
+```bash
+npm run build:boundaries
+```
+
+This runs `node scripts/build-boundaries.mjs` and generates `content/location-boundaries.geojson` from an exported quiz catalog JSON file. See the Map Boundaries feature page for the full export and build procedure. This script is not part of the EdgeOne deployment pipeline and must be run locally when boundary data changes.
+
+## All npm scripts at a glance
+
+| Script | Command | When to run |
+|---|---|---|
+| `npm run build` | `node scripts/cache-bust-assets.mjs` | Automatically on every EdgeOne deploy; also locally to inspect stamped output |
+| `npm run release:patch` | `bump-version.js patch && build:css` | Bump patch version and rebuild CSS |
+| `npm run release:minor` | `bump-version.js minor && build:css` | Bump minor version and rebuild CSS |
+| `npm run release:major` | `bump-version.js major && build:css` | Bump major version and rebuild CSS |
+| `npm run build:css` | `tailwindcss … --minify` | Rebuild `css/tailwind.css` after any Tailwind change |
+| `npm run build:boundaries` | `node scripts/build-boundaries.mjs` | Regenerate `content/location-boundaries.geojson` from catalog |
+| `npm run setup:git-hooks` | `node scripts/setup-git-hooks.js` | Once per clone — installs the version-prefix commit hook |
+
+<CardGroup cols={2}>
+  <Card title="Changing styles" icon="palette">
+    Edit `tailwind.input.css` for custom CSS or `@apply` rules. Edit `tailwind.config.js` to extend the theme or add plugins. Run `npm run build:css` and commit `css/tailwind.css`.
+  </Card>
+  <Card title="Changing the version" icon="tag">
+    Run `npm run release:patch`, `release:minor`, or `release:major`. Both `package.json` and `js/00-site-config.js` are updated, and CSS is rebuilt in one step.
+  </Card>
+</CardGroup>
