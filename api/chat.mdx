@@ -1,5 +1,5 @@
 ---
-title: "Send Messages to Clio, the Hero AI Study Guide"
+title: "Send Messages to Clio, Hero's AI History Study Guide"
 sidebarTitle: "POST /api/chat"
 description: "Talk to Clio, Hero's Gemini-powered history and geography study guide; supports text, image uploads, streaming SSE, and Canvas LMS context injection."
 ---
@@ -174,12 +174,13 @@ A model is skipped and the next is tried on HTTP 404, 429, 500, 502, 503, or 504
 | Code | HTTP | Cause |
 |------|------|-------|
 | `not_configured` | 500 | `GEMINI_API_KEY` is not set |
+| `server_not_configured` | 500 | `FIREBASE_API_KEY` is not set; the endpoint cannot verify caller identity |
 | `signed_out` | 401 | Missing, invalid, or expired `Authorization` header; anonymous Firebase session |
 | `bad_request` | 400 | Request body is not valid JSON, `messages` is not an array, last message is not from `"user"`, or image validation failed |
-| `rate_limited` | 429 | All tried models returned 429 |
-| `upstream_error` | 502 | Gemini returned an error that is not a retryable status; includes `status` and `detail` fields |
+| `rate_limited` | 429 | The last attempted Gemini model returned HTTP 429 |
+| `upstream_error` | 502 | Gemini returned a non-retryable error; includes `status`, `detail`, and `tried` fields |
 | `upstream_unreachable` | 502 | All models in the waterfall failed or the network was unreachable; includes a `tried` array |
-| `empty_reply` | 502 | Gemini responded successfully but produced no text content |
+| `empty_reply` | 502 | Gemini responded successfully but produced no text content; includes a `detail` field with the `finishReason` |
 
 ## Environment variables
 

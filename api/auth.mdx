@@ -45,7 +45,7 @@ description: "Authenticate as admin or dev by submitting a password; receive a s
 </ResponseField>
 
 <ResponseField name="token" type="string">
-  Present only when `target` is `"admin"`. A short-lived signed token of the form `<expiry_ms>.<sha256-hmac>`. The expiry is a Unix millisecond timestamp 30 minutes in the future. The HMAC is computed as `HMAC-SHA-256(ADMIN_PASSWORD, "admin.<expiry_ms>")` and encoded as a lowercase hex string. Pass the full value as `Authorization: Bearer <token>` on `/api/deploy`, or include it as the `token` field in the `/api/deploy` and `/api/push-announcement` request bodies.
+  Present only when `target` is `"admin"`. A short-lived signed token of the form `<expiry_ms>.<sha256-hmac>`. The expiry is a Unix millisecond timestamp 30 minutes in the future. The HMAC is computed as `HMAC-SHA-256(ADMIN_PASSWORD, "admin.<expiry_ms>")` and encoded as a lowercase hex string. Pass the full value as the `token` field in the `/api/deploy` and `/api/push-announcement` request bodies.
 </ResponseField>
 
 ### 401 — Wrong password

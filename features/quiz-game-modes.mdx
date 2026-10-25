@@ -132,7 +132,7 @@ const mergeMiss = (...maps) => {
 };
 ```
 
-`reconcileMisses(uid, cloud)` is called automatically whenever the Firestore snapshot for `memberStats/{uid}` arrives. It merges the cloud data with the local copy and writes the result back to both, skipping the Firestore write when nothing has changed (`sameMiss` compares sorted serializations).
+`reconcileMisses(uid, cloud)` is called automatically whenever the Firestore snapshot for `memberStats/{uid}` arrives. It merges the cloud data with the local copy and writes the result back to both, skipping the Firestore write when nothing has changed (`sameMiss` compares sorted serializations). The function returns early without syncing if any of the following conditions are true: `uid` is empty, `uid` no longer matches the current `missAccountUid` (the account changed mid-flight), a sync is already in progress (`missSyncBusy`), or `window.__heroCanAccessApp` is falsy.
 
 ### Legacy import
 

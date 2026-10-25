@@ -1,7 +1,7 @@
 ---
 title: "Relay Read-Only Canvas LMS Requests Past CORS Restrictions"
 sidebarTitle: "POST /api/canvas"
-description: "Same-origin server-side relay for Canvas LMS API reads; forwards the student's personal access token and returns JSON responses with Link pagination headers."
+description: "Same-origin relay for Canvas LMS API reads; forwards the student's access token and returns JSON responses with Link pagination headers."
 ---
 
 `POST /api/canvas` is a same-origin relay that forwards read-only Canvas LMS API requests from the browser to a student's Canvas instance. Because Canvas schools frequently serve their LMS from a different origin than Hero, browsers block direct `fetch()` calls to Canvas API endpoints. This relay runs server-side, so the CORS restriction does not apply. The student's Canvas personal access token is forwarded in memory only — it is never logged or persisted by the edge function.

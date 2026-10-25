@@ -55,10 +55,10 @@ If any step from step 2 onward fails, Hero attempts a full rollback: deletes the
 
 ## Recovery codes
 
-The one-time recovery code is **20 random bytes formatted as 5 groups of 4 hex characters**, separated by hyphens — for example:
+The one-time recovery code is **20 random bytes formatted as 10 groups of 4 hex characters**, separated by hyphens — for example:
 
 ```text
-ABCD-EF01-2345-6789-AB12
+ABCD-EF01-2345-6789-AB12-CDEF-0123-4567-89AB-CDEF
 ```
 
 Generated client-side using the Web Crypto API:

@@ -67,9 +67,9 @@ The endpoint requires an admin HMAC token obtained from `POST /api/auth`. The to
 | `bad_request` | 400 | Request body could not be parsed as JSON |
 | `unauthorized` | 401 | Token is missing, expired, or HMAC verification failed |
 | `invalid_message` | 400 | `message` is empty, exceeds 120 characters, or contains newline characters |
-| `github_failed` | 502 | A GitHub API call failed (includes `status` field with the HTTP status from GitHub) |
+| `github_failed` | 200 | A GitHub API call failed before the commit was created; the response has `ok: false` and includes a `status` field with the GitHub HTTP status. The branch is unchanged. |
 | `hook_failed` | 502 | The commit was created and pushed but the deploy webhook returned a non-2xx status; includes `status`, `commitSha`, and `commitCreated: true` |
-| `hook_unreachable` | 502 | The commit was created and pushed but the webhook could not be reached; includes `commitCreated: true` and `commitSha` |
+| `hook_unreachable` | 502 | The commit was created and pushed but the webhook could not be reached; includes `commitCreated: true`, `commitSha`, and `status` fields |
 
 <Note>
   When `hook_failed` or `hook_unreachable` is returned, the Git commit has already been pushed to the repository (`commitCreated: true`). You can manually trigger a redeployment from the EdgeOne dashboard without re-calling this endpoint.
@@ -87,7 +87,7 @@ The endpoint requires an admin HMAC token obtained from `POST /api/auth`. The to
 
 ## GitHub operations
 
-The endpoint makes three sequential GitHub API calls:
+The endpoint makes four sequential GitHub API calls:
 
 1. `GET /repos/{owner}/{repo}/git/ref/heads/{branch}` — resolves the current branch HEAD SHA.
 2. `GET /repos/{owner}/{repo}/git/commits/{sha}` — fetches the HEAD commit to obtain its tree SHA.

@@ -1,5 +1,5 @@
 ---
-title: "Deploy Hero to EdgeOne Pages as a Static Site"
+title: "Deploy Hero to Tencent EdgeOne Pages as a Static Site"
 sidebarTitle: "EdgeOne Deploy"
 description: "Connect Hero's repo to EdgeOne Pages, set required environment variables, verify the cache-busting build output, and learn how edge functions read secrets."
 ---
@@ -20,6 +20,10 @@ Hero deploys as a static site on Tencent EdgeOne Pages. The repository includes 
     },
     {
       "source": "/index.html",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    },
+    {
+      "source": "/firebase-messaging-sw.js",
       "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
     },
     {
@@ -106,7 +110,7 @@ Because `index.html` is never cached, open tabs receive fresh asset URLs on each
 
 All server-side logic lives in `edge-functions/api/`. Each file exports one or more named handlers that EdgeOne invokes at the network edge:
 
-```
+```text
 edge-functions/api/
   auth.js              POST /api/auth
   deploy.js            POST /api/deploy

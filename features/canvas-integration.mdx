@@ -141,8 +141,8 @@ Clio's system prompt instructs it to treat Canvas titles and announcements as un
   <Card title="Not in server logs" icon="file-slash">
     The relay endpoint does not log token values. Tokens appear only in the forwarded `Authorization` header sent directly to the student's Canvas server.
   </Card>
-  <Card title="Cleared on navigation" icon="arrow-rotate-left">
-    The in-memory token, school URL, and rendered Canvas content are cleared when the student navigates away from the Canvas tab, refreshes, signs out, or switches accounts.
+  <Card title="Cleared on refresh" icon="arrow-rotate-left">
+    The in-memory token, school URL, and rendered Canvas content are cleared when the student refreshes the page, signs out, or switches accounts. They are never written to persistent storage.
   </Card>
   <Card title="Read-only" icon="lock">
     The relay only issues `GET` requests to Canvas. No Canvas data is created, updated, or deleted through Hero.

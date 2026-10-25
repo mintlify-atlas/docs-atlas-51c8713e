@@ -1,5 +1,5 @@
 ---
-title: "Trigger a New Deployment from the Steward Panel"
+title: "Trigger a New Hero Deployment from the Steward Panel"
 sidebarTitle: "Steward Redeploy"
 description: "How the Steward redeploy card works, required environment variables, how to obtain an admin token, and what every error code from POST /api/deploy means."
 ---
@@ -122,11 +122,12 @@ A successful response returns the new commit SHA, the commit message, and the br
 |---|---|---|
 | `not_configured` | 500 | One or more required environment variables are missing. The `missing` array lists which ones. |
 | `invalid_deploy_config` | 500 | `GITHUB_REPOSITORY` or `DEPLOY_BRANCH` failed format validation. Allowed characters: `A–Z`, `a–z`, `0–9`, `_`, `.`, `-`; repository must contain exactly one `/`. |
+| `bad_request` | 400 | The request body is not valid JSON. |
 | `unauthorized` | 401 | The admin token is expired, missing, or was signed with a different `ADMIN_PASSWORD`. |
 | `invalid_message` | 400 | The commit message is empty, longer than 120 characters, or contains a newline character. |
-| `github_failed` | varies | The GitHub API returned an error before the branch was advanced. No commit was created. |
-| `hook_failed` | 502 | The empty commit was created and the branch was advanced, but the EdgeOne webhook returned a non-2xx status. The `commitSha` field contains the SHA of the dangling commit. |
-| `hook_unreachable` | 502 | The branch was advanced but the webhook request itself failed (network error or timeout). The `commitSha` field contains the SHA. |
+| `github_failed` | 200 | The GitHub API returned an error before the branch was advanced. No commit was created. |
+| `hook_failed` | 502 | The empty commit was created and the branch was advanced, but the EdgeOne webhook returned a non-2xx status. The response includes `commitCreated: true` and `commitSha` with the new commit SHA. |
+| `hook_unreachable` | 502 | The branch was advanced but the webhook fetch threw a network error or timeout. The response includes `commitCreated: true` and `commitSha` with the new commit SHA. |
 
 <Note>
   When `hook_failed` or `hook_unreachable` is returned, the Git branch has already been updated. You can trigger the build manually from the EdgeOne console, or push another commit to advance the branch again. The empty commit is a valid part of your repository history.

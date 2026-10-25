@@ -1,7 +1,7 @@
 ---
-title: "Save or Verify One-Time Recovery Codes for Hero Username Accounts"
+title: "Manage Account Recovery Codes for Hero Username Accounts"
 sidebarTitle: "POST /api/account-recovery"
-description: "Stores or verifies an HMAC-hashed recovery code for a Hero username account; on success, resets the Firebase Auth password to a new value the user provides."
+description: "Save, delete, or redeem a pepper-keyed HMAC recovery code for a Hero username account; on success, resets the Firebase Auth password."
 ---
 
 `POST /api/account-recovery` handles the server-side half of Hero's account recovery flow. Hero accounts use a short username rather than an email address, so there is no standard password-reset email path. Instead, when a user creates an account, they receive a one-time 40-hex-character recovery code. This endpoint stores a pepper-keyed HMAC of that code in Firestore. When the user later needs to recover access, they submit the code and a new password; the endpoint verifies the HMAC and calls Firebase Authentication to reset the password.
@@ -14,7 +14,7 @@ Only the HMAC of the recovery code is stored server-side, never the code itself.
 
 ## Username rules
 
-Usernames must be 3–20 characters, matching `[a-z0-9_]` (case-insensitive). Internally, Firebase Auth stores the username as an email address in the reserved, non-deliverable domain `accounts.hero.invalid`. Users never enter or see this internal address.
+Usernames must be 3–20 characters, matching `[a-z0-9_]` (lowercase only). Internally, Firebase Auth stores the username as an email address in the reserved, non-deliverable domain `accounts.hero.invalid`. Users never enter or see this internal address.
 
 ## Actions
 
@@ -58,7 +58,40 @@ Called at account creation and again after a successful recovery to register the
 
 ---
 
-### `recover` — Verify a code and reset the password
+### `delete` — Remove a recovery record
+
+Removes the stored recovery record for the caller's account. After deletion, the account cannot be recovered using the old code. Requires a valid Firebase ID token for the account being modified.
+
+**Authentication:** `Authorization: Bearer <firebase-id-token>`
+
+#### Request body
+
+```json
+{
+  "action": "delete",
+  "username": "explorer42"
+}
+```
+
+<ParamField body="action" type="string" required>
+  Must be `"delete"`.
+</ParamField>
+
+<ParamField body="username" type="string" required>
+  The Hero username whose recovery record should be deleted. Must match `[a-z0-9_]{3,20}`. The ID token's associated email must be `<username>@accounts.hero.invalid`.
+</ParamField>
+
+#### Success response
+
+```json
+{ "ok": true }
+```
+
+Returns `{"ok": true}` even if no recovery record existed (idempotent).
+
+---
+
+### `reset` — Verify a code and reset the password
 
 Called when a user needs to regain access to their account. Does not require a Firebase ID token — the recovery code is the credential. On success the Firebase Auth password is updated to the new value supplied by the caller.
 
@@ -68,7 +101,7 @@ Called when a user needs to regain access to their account. Does not require a F
 
 ```json
 {
-  "action": "recover",
+  "action": "reset",
   "username": "explorer42",
   "recoveryCode": "A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A9B0",
   "password": "new-secure-password"
@@ -76,11 +109,11 @@ Called when a user needs to regain access to their account. Does not require a F
 ```
 
 <ParamField body="action" type="string" required>
-  Must be `"recover"`.
+  Must be `"reset"`.
 </ParamField>
 
 <ParamField body="username" type="string" required>
-  The Hero username to recover. Must match `[a-z0-9_]{3,20}`. Case-insensitive — converted to lowercase before lookup.
+  The Hero username to recover. Must match `[a-z0-9_]{3,20}` (lowercase only). Converted to lowercase before lookup.
 </ParamField>
 
 <ParamField body="recoveryCode" type="string" required>
@@ -97,7 +130,7 @@ Called when a user needs to regain access to their account. Does not require a F
 { "ok": true }
 ```
 
-After a successful recovery, the client should immediately call `save` with a freshly generated replacement recovery code so the user can recover the account again in the future.
+After a successful reset, the client should immediately call `save` with a freshly generated replacement recovery code so the user can recover the account again in the future.
 
 ---
 
@@ -138,19 +171,17 @@ During a `recover` operation, the endpoint:
 
 | Code | HTTP | Cause |
 |------|------|-------|
-| `not_configured` | 503 | One or more required environment variables are missing or invalid |
-| `bad_request` | 400 | Body is not valid JSON, `action` is unrecognized, `username` fails pattern check, `recoveryCode` is not a valid 40-hex-char string, or `password` is out of range (8–128 chars) for `recover` |
-| `not_authorized` | 401 | `save`: Firebase ID token is missing, invalid, or does not belong to the requested username |
-| `username_unavailable` | 409 | `save`: A recovery record already exists for the username with a different Firebase UID |
+| `not_configured` | 503 | One or more required environment variables are missing or invalid (see `config()` requirements) |
+| `bad_request` | 400 | Body not JSON or too large (>12 000 chars), `action` is unrecognized, `username` fails pattern check, `recoveryCode` is not a valid 40-hex-char string after stripping separators, or `password` is out of range (8–128 chars) for `reset` |
+| `not_authorized` | 401 | `save` or `delete`: Firebase ID token is missing, invalid, or does not belong to the requested username |
+| `username_unavailable` | 409 | `save`: A recovery record already exists for the username under a different Firebase UID |
+| `invalid_recovery` | 400 | `reset`: The Firestore document is missing, the HMAC does not match, or an optimistic-lock conflict occurred during the atomic claim |
 | `service_account_auth_failed` | 503 | The edge function could not obtain a Google OAuth access token using the service account credentials |
 | `firestore_permission_denied` | 503 | Firestore returned HTTP 403; the service account lacks the required Firestore IAM role |
-| `firestore_write_failed` | 503 | A Firestore write failed for a reason other than a permission error |
-| `user_not_found` | 400 | `recover`: No recovery record exists for the given username |
-| `code_invalid` | 400 | `recover`: The provided recovery code does not match the stored HMAC |
-| `reset_failed` | 503 | `recover`: The code was verified but Firebase Authentication rejected the password reset |
+| `recovery_unavailable` | 503 | An unexpected error occurred during the operation (catch-all) |
 
 <Note>
-  The `recover` action returns `bad_request` (not a dedicated `user_not_found` or `code_invalid` code) when the Firestore document is missing or the HMAC does not match. This is intentional — merging these cases prevents username-enumeration attacks.
+  The `reset` action returns `invalid_recovery` (not a dedicated "not found" or "wrong code" error) when the Firestore document is missing or the HMAC does not match. This is intentional — merging these cases prevents username-enumeration attacks.
 </Note>
 
 ## Privacy note
@@ -189,13 +220,13 @@ curl -s -X POST https://example.com/api/account-recovery \
 { "ok": true }
 ```
 
-### Recover an account (reset password)
+### Reset a password (recover an account)
 
 ```bash
 curl -s -X POST https://example.com/api/account-recovery \
   -H "Content-Type: application/json" \
   -d '{
-    "action": "recover",
+    "action": "reset",
     "username": "explorer42",
     "recoveryCode": "A1B2C3D4-E5F6A7B8-C9D0E1F2-A3B4C5D6-E7F8A9B0",
     "password": "my-new-secure-password-2025"

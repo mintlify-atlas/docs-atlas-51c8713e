@@ -70,7 +70,7 @@ window.__app_id = SITE.id;
 
 1. Open [Firebase Console](https://console.firebase.google.com/) and create a new project (or reuse an existing one).
 2. Under **Build → Firestore Database**, create a database. Choose the region closest to your users.
-3. Under **Build → Authentication → Sign-in method**, enable **Email/Password**. Hero implements usernames as non-deliverable `@accounts.hero.invalid` email aliases internally; this provider must remain enabled even though users never enter an email address.
+3. Under **Build → Authentication → Sign-in method**, enable **Email/Password**. Hero implements usernames as non-deliverable `@accounts.hero.invalid` email aliases internally; this provider must remain enabled even though users never enter an email address. Also **disable the Google provider** — the site no longer offers Google sign-in or account migration.
 4. Under **Authentication → Settings → Authorized domains**, add your EdgeOne Pages deployment domain (e.g., `your-project.edgeone.app`).
 5. Navigate to **Firestore Database → Rules**, paste the full contents of `firestore.rules` from the repository, and click **Publish**.
 
@@ -109,12 +109,17 @@ In your EdgeOne Pages project, go to **Settings → Environment variables** and 
 | `FIREBASE_PRIVATE_KEY_1` … `FIREBASE_PRIVATE_KEY_N` | **Yes** | Service-account private key split into chunks of ≤ 450 characters each. A single `FIREBASE_PRIVATE_KEY` variable is also supported. |
 | `FIREBASE_API_KEY` | **Yes** | The same `apiKey` value already in `js/02-firebase-config.js` — the edge function needs its own copy for server-side Firebase Auth verification |
 | `ACCOUNT_RECOVERY_PEPPER` | **Yes** | A private random value used to HMAC one-time account recovery codes |
-| `DEV_ACCESS` | Yes for early access / dev mode | Unlocks the launch countdown and Dev Mode controls |
+| `DEV_ACCESS` | Yes for early access | Unlocks the launch countdown and development mode controls |
+| `FIREBASE_WEB_PUSH_VAPID_KEY` | Yes for push notifications | Public Web Push certificate key from Firebase Console → Project settings → Cloud Messaging → Web Push certificates |
+| `DEPLOY_WEBHOOK_URL` | Yes for redeploy | EdgeOne build/deploy webhook URL |
+| `GITHUB_TOKEN` | Yes for redeploy | GitHub token with repository contents read/write access |
 | `GEMINI_API_KEY` | Optional | Enables the Clio AI assistant |
-| `FIREBASE_WEB_PUSH_VAPID_KEY` | Optional | Enables Web Push notifications (public VAPID key from Firebase Console → Cloud Messaging) |
-| `DEPLOY_WEBHOOK_URL` | Optional | EdgeOne build webhook URL for the steward redeploy action |
-| `GITHUB_TOKEN` | Optional | GitHub token for the steward redeploy action (requires repository contents read/write) |
-| `CANVAS_ALLOWED_HOSTS` | Optional | Comma-separated hostnames for custom Canvas domains beyond `*.instructure.com` |
+| `FIREBASE_SITE_ID` | Optional | Firestore data namespace for account-recovery records; defaults to `hero-2026` and should match `SITE.id` in `js/00-site-config.js` |
+| `FIREBASE_PROJECT_ID` | Optional | Firebase project ID; required for account recovery if it cannot be derived from `FIREBASE_CLIENT_EMAIL` |
+| `GITHUB_REPOSITORY` | Optional | Repository as `owner/name`; defaults to `crwcln/heroapp` |
+| `DEPLOY_BRANCH` | Optional | Branch to commit to; defaults to `main` |
+| `GEMINI_MODEL` | Optional | Overrides the model preference list in `edge-functions/api/chat.js` |
+| `CANVAS_ALLOWED_HOSTS` | Optional | Comma- or space-separated exact hostnames for custom Canvas domains; `*.instructure.com` is allowed by default |
 
 To generate a secure `ACCOUNT_RECOVERY_PEPPER`, run this locally and paste the output directly into EdgeOne — do not save it in the repository:
 

@@ -28,16 +28,20 @@ Each token document has the shape:
 }
 ```
 
-The Firestore rules allow each signed-in member to create and delete only their own token documents:
+The Firestore rules allow each signed-in member to create, update, and delete only their own token documents:
 
 ```text
 match /pushTokens/{tokenId} {
+  allow get, list: if isAdmin() || (signedIn() && request.auth.uid == memberId);
   allow create, update: if signedIn()
     && request.auth.uid == memberId
     && request.resource.data.keys().hasOnly(['token', 'enabled', 'updatedAt'])
+    && request.resource.data.keys().hasAll(['token', 'enabled', 'updatedAt'])
+    && request.resource.data.token is string
     && request.resource.data.token.size() >= 100
     && request.resource.data.token.size() <= 4096
-    && request.resource.data.enabled == true;
+    && request.resource.data.enabled == true
+    && request.resource.data.updatedAt is timestamp;
   allow delete: if isAdmin() || (signedIn() && request.auth.uid == memberId);
 }
 ```
@@ -92,6 +96,18 @@ The push payload sent by the edge function always includes a `url` field pointin
 <Note>
   The `firebase-messaging-sw.js` file must stay in sync with the Firebase app config in `js/02-firebase-config.js`. Both files reference the same `projectId`, `messagingSenderId`, and `appId`.
 </Note>
+
+## Public API
+
+`window.__heroSendAnnouncementPush` is the browser-side function that triggers an announcement push. It is defined in `js/05-auth-changelog-devmode-deploy.js` and is only available during an active steward session (`adminToken` must be set):
+
+```js
+// Sends a push notification to all opted-in devices.
+// Returns the FCM send summary: { ok, sent, removed, failed }
+const result = await window.__heroSendAnnouncementPush(title, body);
+```
+
+The function POSTs to `/api/push-announcement` with the current `adminToken`. It throws a descriptive `Error` if the session has expired or if the server returns a non-OK response.
 
 ## Sending announcements
 

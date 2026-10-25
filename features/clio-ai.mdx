@@ -203,7 +203,8 @@ Canvas data is **not** sent to Clio automatically—the student must opt in each
 | `400` | `bad_request` | Malformed JSON, empty messages array, or invalid image |
 | `401` | `signed_out` | Missing, invalid, or anonymous-session token |
 | `429` | `rate_limited` | Gemini API rate limit hit across all models |
-| `500` | `not_configured` | `GEMINI_API_KEY` or `FIREBASE_API_KEY` is not set |
+| `500` | `not_configured` | `GEMINI_API_KEY` is not set |
+| `500` | `server_not_configured` | `FIREBASE_API_KEY` is not set (auth check cannot run) |
 | `502` | `upstream_error` | Gemini returned a non-OK status on all models |
 | `502` | `upstream_unreachable` | All models failed or timed out before responding |
 

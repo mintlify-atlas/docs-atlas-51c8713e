@@ -1,5 +1,5 @@
 ---
-title: "Versioning, CSS Builds, and npm Scripts Reference"
+title: "Hero Versioning, CSS Builds, and npm Scripts Reference"
 sidebarTitle: "Versioning & CSS"
 description: "How to bump the Hero version, rebuild Tailwind CSS, run the cache-busting build, and what every npm script in package.json does and when to use it."
 ---
@@ -83,9 +83,9 @@ This runs `node scripts/build-boundaries.mjs` and generates `content/location-bo
 | Script | Command | When to run |
 |---|---|---|
 | `npm run build` | `node scripts/cache-bust-assets.mjs` | Automatically on every EdgeOne deploy; also locally to inspect stamped output |
-| `npm run release:patch` | `bump-version.js patch && build:css` | Bump patch version and rebuild CSS |
-| `npm run release:minor` | `bump-version.js minor && build:css` | Bump minor version and rebuild CSS |
-| `npm run release:major` | `bump-version.js major && build:css` | Bump major version and rebuild CSS |
+| `npm run release:patch` | `node scripts/bump-version.js patch && npm run build:css` | Bump patch version and rebuild CSS |
+| `npm run release:minor` | `node scripts/bump-version.js minor && npm run build:css` | Bump minor version and rebuild CSS |
+| `npm run release:major` | `node scripts/bump-version.js major && npm run build:css` | Bump major version and rebuild CSS |
 | `npm run build:css` | `tailwindcss … --minify` | Rebuild `css/tailwind.css` after any Tailwind change |
 | `npm run build:boundaries` | `node scripts/build-boundaries.mjs` | Regenerate `content/location-boundaries.geojson` from catalog |
 | `npm run setup:git-hooks` | `node scripts/setup-git-hooks.js` | Once per clone — installs the version-prefix commit hook |

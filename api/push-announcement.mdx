@@ -1,7 +1,7 @@
 ---
 title: "Send a Web Push Notification to All Opted-In Browsers"
 sidebarTitle: "POST /api/push-announcement"
-description: "Broadcasts a Web Push notification via Firebase Cloud Messaging to every browser that has opted in; automatically removes expired or unregistered push tokens."
+description: "Broadcasts a Web Push notification via FCM to every opted-in browser; automatically removes expired or unregistered push tokens from Firestore."
 ---
 
 `POST /api/push-announcement` sends a Web Push notification to every browser that has opted in to Hero notifications. The endpoint reads push token documents from the Firestore `pushTokens` collection, fans out FCM send requests in parallel batches, and automatically deletes tokens that FCM reports as expired or unregistered. It requires a valid admin HMAC token obtained from `POST /api/auth`.

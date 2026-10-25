@@ -39,7 +39,7 @@ All secrets are read from `context.env` inside the edge function at request time
 | `POST` | `/api/deploy` | Admin HMAC token (body) | Create an empty Git commit and trigger an EdgeOne redeploy webhook |
 | `POST` | `/api/push-announcement` | Admin HMAC token (body) | Send a Web Push notification to all opted-in browsers |
 | `GET` | `/api/push-config` | None | Return the VAPID public key for Web Push subscription creation |
-| `POST` | `/api/account-recovery` | Firebase ID token (save) / None (recover) | Save or verify one-time account recovery codes |
+| `POST` | `/api/account-recovery` | Firebase ID token (save/delete) / None (reset) | Save, delete, or use a one-time recovery code to reset a password |
 
 ## Environment variable summary
 
